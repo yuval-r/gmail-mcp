@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from gmail_mcp.config import SCOPES, client_secret_path
@@ -43,8 +44,21 @@ def _add() -> int:
         return 1
 
     flow = InstalledAppFlow.from_client_secrets_file(str(secret), SCOPES)
-    print("Opening your browser to authorize a Gmail account...")
-    creds = flow.run_local_server(port=0, prompt="consent")
+    # Fixed port + no auto-launch: this server is headless. The flow prints an
+    # auth URL you open in a browser on your own machine; the redirect comes
+    # back to localhost:OAUTH_PORT, so SSH-forward that port (-L 8765:localhost:8765)
+    # when authorizing remotely. Override with GMAIL_MCP_OAUTH_PORT.
+    port = int(os.environ.get("GMAIL_MCP_OAUTH_PORT", "8765"))
+    print(
+        "\nAuthorize a Gmail account:\n"
+        "  1. A URL will print below — open it in a browser signed into the "
+        "account you want to add.\n"
+        f"  2. After you approve, Google redirects to http://localhost:{port}/ .\n"
+        f"     If you're SSH'd in, forward it: ssh -L {port}:localhost:{port} ...\n"
+    )
+    creds = flow.run_local_server(
+        port=port, prompt="consent", open_browser=False
+    )
 
     if not creds.refresh_token:
         print(
