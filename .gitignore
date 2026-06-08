@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tests
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets & tokens — NEVER commit these
+*.db
+client_secret*.json
+tokens.db
+.gmail-mcp/
