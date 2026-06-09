@@ -20,9 +20,11 @@ endpoint, and upserts the refresh token into the SQLite token store.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import sys
+import time
 
 from gmail_mcp.config import SCOPES, client_secret_path
 from gmail_mcp.store import TokenStore
@@ -56,9 +58,25 @@ def _add() -> int:
         f"  2. After you approve, Google redirects to http://localhost:{port}/ .\n"
         f"     If you're SSH'd in, forward it: ssh -L {port}:localhost:{port} ...\n"
     )
-    creds = flow.run_local_server(
-        port=port, prompt="consent", open_browser=False
-    )
+    # The fixed port can still be in TIME_WAIT from a previous `add` run, which
+    # makes the bind fail with EADDRINUSE. Retry a few times before giving up so
+    # back-to-back account adds don't bounce on the first attempt.
+    creds = None
+    for attempt in range(1, 6):
+        try:
+            creds = flow.run_local_server(
+                port=port, prompt="consent", open_browser=False
+            )
+            break
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE or attempt == 5:
+                raise
+            print(
+                f"Port {port} busy (likely TIME_WAIT from a prior add); "
+                f"retrying in 2s ({attempt}/4)...",
+                file=sys.stderr,
+            )
+            time.sleep(2)
 
     if not creds.refresh_token:
         print(
