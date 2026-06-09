@@ -23,9 +23,9 @@ in one SQLite file you can inspect, copy, or delete, talks only to Google and
 your MCP client, and hardcodes no secrets.
 
 It reads, searches, drafts, and labels. It doesn't send — `create_draft` leaves
-a draft for you to send yourself. That's a deliberate default (more on the
-reasoning in [Security notes](#security-notes)), not a hard stance; if you want
-autonomous send, it's a small addition or a different server.
+a draft for you to send yourself. That's a deliberate default (reasoning in
+[Security model](#security-model)), not a hard stance; if you want autonomous
+send, it's a small addition or a different server.
 
 ---
 
@@ -35,11 +35,16 @@ autonomous send, it's a small addition or a different server.
 - [Design notes](#design-notes)
 - [Tools](#tools)
 - [Architecture](#architecture)
+- [Identity & auth model](#identity--auth-model)
+  - [The OAuth model](#the-oauth-model)
+  - [The multi-account model](#the-multi-account-model)
+  - [Token lifecycle](#token-lifecycle)
+  - [The headless auth path](#the-headless-auth-path)
+- [Security model](#security-model)
 - [Install](#install)
 - [Quickstart](#quickstart)
 - [Configuration](#configuration)
 - [Register with an MCP client](#register-with-an-mcp-client)
-- [Security notes](#security-notes)
 - [Development](#development)
 - [Project layout](#project-layout)
 - [License](#license)
@@ -131,8 +136,218 @@ flowchart TD
 
 Authorization happens once per account through the CLI (it needs a browser).
 After that the stdio server reads tokens straight from SQLite, refreshing access
-tokens on demand and persisting them back. Full token lifecycle and diagrams in
-**[docs/AUTH.md](docs/AUTH.md)**.
+tokens on demand and persisting them back. The rest of this section is the
+"why it works the way it does" detail.
+
+---
+
+## Identity & auth model
+
+How `gmail-mcp` authenticates to Gmail, juggles multiple accounts under a single
+OAuth client, refreshes tokens over time, and authorizes accounts on a headless
+server. If you just want to get running, jump to [Quickstart](#quickstart).
+
+### The OAuth model
+
+`gmail-mcp` authenticates using a Google **"Desktop app"** OAuth client (an
+*installed application* in OAuth 2.0 terms), driven by the `InstalledAppFlow`
+helper from `google-auth-oauthlib`.
+
+**Why an installed-app / desktop client.** Installed apps run on a machine the
+end user controls, so OAuth treats them as **public clients**: the `client_secret`
+in the downloaded `client_secret.json` is *not* assumed to be confidential.
+That's the right trust model for a local CLI/desktop tool — there's no
+server-side component that could keep a secret truly secret, and security rests
+on the user controlling the redirect (the loopback address) rather than on secret
+confidentiality. It's the client type Google recommends for command-line and
+desktop tools.
+
+**The loopback redirect flow.** After you approve consent in a browser, Google
+redirects the authorization code to `http://localhost:<port>/`, where a tiny
+throwaway HTTP server (started by `InstalledAppFlow.run_local_server`) catches
+it. `gmail-mcp` pins this to a fixed port (default `8765`, override with
+`GMAIL_MCP_OAUTH_PORT`) and runs with `open_browser=False` so it works on
+machines with no browser — see [The headless auth path](#the-headless-auth-path).
+
+**Scopes requested.** Three granular scopes — never the full-mailbox
+`https://mail.google.com/`:
+
+| Scope | What it grants |
+|-------|----------------|
+| `gmail.readonly` | Read mail and metadata: search messages/threads, read bodies, list labels and drafts. Read-only — cannot modify anything. |
+| `gmail.compose` | Create, update, and manage drafts. Used only by `create_draft`. |
+| `gmail.modify` | Add/remove labels on messages. Used by `modify_labels`. |
+
+`gmail.send` is not requested. Without it the credential simply has no Gmail API
+path to send mail — the drafts-only behavior is a property of the grant, not just
+an omitted tool. The scope list lives in one place: `SCOPES` in
+`src/gmail_mcp/config.py`.
+
+### The multi-account model
+
+- **One OAuth client authorizes many accounts.** You create a single Google
+  Cloud project and one "Desktop app" OAuth client, then run the consent flow
+  once per Gmail account, signing into the account you want to add each time. A
+  single `client_secret.json` can authorize any number of accounts.
+- **Each account is a row in SQLite.** Every authorized account is stored in the
+  `accounts` table (`~/.gmail-mcp/tokens.db`, override with `GMAIL_MCP_DB`),
+  **keyed by email**. The row holds the long-lived refresh token, the most recent
+  access-token blob, the granted scopes, and timestamps.
+- **Tool calls route by the `account` param.** Every tool except `list_accounts`
+  and `search_all_accounts` takes an `account`. The server looks that email up,
+  builds a credential for it, and calls the Gmail API as that account. Unknown
+  accounts return a clear error listing what's authorized. `search_all_accounts`
+  iterates over every stored row.
+
+```mermaid
+flowchart LR
+    Client[MCP client / agent] -->|account=a@x.com| Server[gmail_mcp.server]
+    Server --> Store[(accounts table<br/>keyed by email)]
+    Store -->|row a@x.com| CredsA[Credentials a]
+    Store -->|row b@y.com| CredsB[Credentials b]
+    CredsA --> InboxA[Gmail: a@x.com]
+    CredsB --> InboxB[Gmail: b@y.com]
+    Secret[client_secret.json<br/>one OAuth client] -.shared by all rows.-> CredsA
+    Secret -.-> CredsB
+```
+
+### Token lifecycle
+
+**Initial grant** (one-time, per account, via the CLI). The OAuth flow needs a
+browser, which an MCP tool can't drive cleanly, so authorization lives in the
+`gmail-mcp-auth` CLI rather than as a tool.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CLI as gmail-mcp-auth add
+    participant Browser
+    participant Google as Google OAuth + Gmail API
+    participant Store as SQLite token store
+
+    User->>CLI: run `gmail-mcp-auth add`
+    CLI->>CLI: load client_secret.json,<br/>start loopback server on :8765
+    CLI-->>User: print consent URL (open_browser=False)
+    User->>Browser: open URL, sign into target account
+    Browser->>Google: consent + approve scopes
+    Google-->>Browser: redirect with authorization code
+    Browser->>CLI: GET http://localhost:8765/?code=...
+    CLI->>Google: exchange code for tokens
+    Google-->>CLI: access token + refresh token
+    CLI->>Google: users.getProfile (discover email)
+    Google-->>CLI: emailAddress
+    CLI->>Store: upsert(email, refresh_token, token, scopes)
+    CLI-->>User: "Authorized and stored: you@gmail.com"
+```
+
+- The CLI passes `prompt="consent"` to **force a refresh token to be issued** —
+  Google only returns one on a fresh consent. The CLI errors clearly if no
+  refresh token comes back (revoke the app at
+  <https://myaccount.google.com/permissions> and re-run).
+- The account's email is **discovered**, not typed: after the token exchange the
+  CLI calls `users.getProfile` and keys the stored row by the returned address.
+
+**Per-request refresh** (every tool call). Access tokens are short-lived (≈1
+hour). On each call the server rebuilds a credential for the target account, lets
+`google-auth` refresh it on demand, and persists the refreshed blob back.
+
+```mermaid
+sequenceDiagram
+    participant Client as MCP client / agent
+    participant Server as gmail_mcp.server
+    participant Store as SQLite token store
+    participant Google as Google OAuth + Gmail API
+
+    Client->>Server: tool call (account=you@gmail.com)
+    Server->>Store: get(account) → refresh_token + last token
+    Server->>Server: build Credentials
+    alt access token still valid
+        Server->>Google: Gmail API request
+    else access token expired
+        Server->>Google: refresh using refresh_token
+        Google-->>Server: new access token
+        Server->>Store: update_token(account, new blob)
+        Server->>Google: Gmail API request
+    end
+    Google-->>Server: response
+    Server->>Store: touch(account) → last_used_at
+    Server-->>Client: result (email content wrapped as untrusted)
+```
+
+If a refresh fails (revoked grant, expired refresh token), the server raises
+`GmailAuthError` with a "re-run `gmail-mcp-auth add`" message rather than crashing.
+
+**Testing vs. Published — the 7-day gotcha.** This is the usual "it stopped
+working after a week" surprise:
+
+- While the OAuth consent screen is in **Testing** mode, only listed **test
+  users** can authorize, and refresh tokens issued to an **unverified** app
+  **expire after 7 days** — you'd re-run `gmail-mcp-auth add` weekly.
+- **Publishing** the app (consent screen → *Publish app*) makes refresh tokens
+  long-lived. Google will warn it's "unverified" — expected and fine for a
+  self-hosted personal tool you don't distribute. For long-lived use, publish.
+  [SETUP.md](docs/SETUP.md) has the exact clicks.
+
+### The headless auth path
+
+The typical target is a headless server (no desktop, no browser), but OAuth
+consent has to happen in a browser. The flow bridges that:
+
+- **`open_browser=False`** — the CLI prints the consent URL instead of launching
+  a browser. You open it on your own laptop, signed into the account you're
+  adding.
+- **Fixed loopback port** — after approval Google redirects to
+  `http://localhost:<port>/`. That "localhost" is the *server's* loopback, where
+  the CLI listens. The port is fixed (default `8765`, `GMAIL_MCP_OAUTH_PORT`) so
+  you can forward it deterministically.
+- **SSH port-forward** — bridge your laptop's browser to the server's loopback:
+
+  ```bash
+  ssh -L 8765:localhost:8765 you@your-server
+  ```
+
+  Now when the redirect hits `localhost:8765` on your laptop, SSH tunnels it to
+  the server, where the CLI catches the code and finishes the exchange.
+
+---
+
+## Security model
+
+An inbox is full of text other people wrote, so it's a natural place for prompt
+injection. The standard framing is the **lethal trifecta** — injection is
+dangerous when an agent has all three of:
+
+```mermaid
+flowchart LR
+    A[Private data<br/>your mailboxes] --- C{Injection<br/>risk}
+    B[Untrusted content<br/>any email you receive] --- C
+    D[Egress channel<br/>a way to send data out] --- C
+    C -.->|drafts-only removes the obvious one| D
+    style D stroke-dasharray: 5 5
+```
+
+A mail reader has the first two by nature. A couple of choices keep the third
+low-stakes:
+
+- **Drafts instead of send.** `create_draft` is the outgoing ceiling — there's no
+  send tool and no `gmail.send` scope. A draft sits in your drafts folder until
+  *you* send it, so an instruction buried in an email can't make the agent mail
+  your data anywhere. Sensible default, easy to change if you want send.
+- **Email content is marked as untrusted.** Message text the tools return is
+  wrapped in `⟦UNTRUSTED EMAIL CONTENT⟧` delimiters by a single helper
+  (`wrap_untrusted` in `gmail.py`), with ids kept **outside** so tool-chaining
+  still works. The read tools also note in their descriptions that content is
+  data, not instructions.
+
+**Known limitation.** This only governs *this* server's surface. If the same
+agent session also has a tool that can reach the open internet (web fetch, HTTP),
+that's a separate egress path `gmail-mcp` can't do anything about — pairing it
+with an arbitrary-egress tool re-opens the trifecta elsewhere. Be deliberate
+about which tools share a session.
+
+Two more notes: no audit log is implemented (intentionally out of scope), and no
+secrets are hardcoded — `client_id`/`client_secret` come from your downloaded
+`client_secret.json`, and tokens live only in your local SQLite store.
 
 ---
 
@@ -223,29 +438,6 @@ explicitly when needed (some clients don't expand `~`):
 
 ---
 
-## Security notes
-
-An inbox is full of text other people wrote, so it's a natural place for prompt
-injection — an email that tries to talk your agent into doing something. A couple
-of choices keep that low-stakes:
-
-- **Drafts instead of send.** `create_draft` is the outgoing ceiling; there's no
-  send tool and no `gmail.send` scope. A draft just sits in your drafts folder
-  until you send it, so an instruction buried in some email can't make the agent
-  mail your data anywhere. It's a sensible default, easy to change if you want
-  send — not a guarantee about anything beyond this server's own surface.
-- **Email content is marked as untrusted.** Message text the tools return is
-  wrapped in `⟦UNTRUSTED EMAIL CONTENT⟧` delimiters, with ids kept outside so
-  tool-chaining still works. The read tools also note in their descriptions that
-  content is data, not instructions.
-
-Worth knowing: this only governs *this* server. If the same agent session also
-has a tool that can reach the open internet (web fetch, HTTP), that's a separate
-egress path `gmail-mcp` can't do anything about. The reasoning and full threat
-model are in **[docs/AUTH.md](docs/AUTH.md)**.
-
----
-
 ## Development
 
 ```bash
@@ -271,7 +463,6 @@ src/gmail_mcp/
   auth.py      gmail-mcp-auth CLI: add / list / remove (loopback OAuth)
   config.py    SCOPES + env-overridable paths
 docs/
-  AUTH.md      identity & auth model, token lifecycle, threat model (+ diagrams)
   SETUP.md     step-by-step Google Cloud + account authorization
 tests/         store / gmail / server, Gmail client mocked
 ```
