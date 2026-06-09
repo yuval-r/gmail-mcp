@@ -20,7 +20,7 @@ from pathlib import Path
 # OAuth scopes. Granular — read, compose drafts, and modify labels.
 # NOT the full https://mail.google.com/ scope. gmail.send is intentionally
 # NOT requested: this server never sends mail autonomously, it only creates
-# drafts that kc sends by hand (prompt-injection safety).
+# drafts that you send by hand (prompt-injection safety).
 SCOPES: list[str] = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",

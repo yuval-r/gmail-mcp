@@ -56,16 +56,18 @@ The server is headless, so the login happens in your laptop browser but the
    mv ~/whatever-google-named-it.json ~/.gmail-mcp/client_secret.json
    ```
    (From your laptop you can scp it:
-   `scp ~/Downloads/client_secret_*.json kc@superhellfirejr:~/.gmail-mcp/client_secret.json`)
+   `scp ~/Downloads/client_secret_*.json you@your-server:~/.gmail-mcp/client_secret.json`)
 
 2. **SSH in with the port forwarded:**
    ```bash
-   ssh -L 8765:localhost:8765 kc@superhellfirejr
+   ssh -L 8765:localhost:8765 you@your-server
    ```
+   (If you set `GMAIL_MCP_OAUTH_PORT` to something other than 8765, forward
+   that port instead.)
 
 3. **Authorize an account:**
    ```bash
-   /mnt/x/code/gmail-mcp/.venv/bin/gmail-mcp-auth add
+   .venv/bin/gmail-mcp-auth add        # from the repo root (or just `gmail-mcp-auth add` if the venv is active)
    ```
    It prints a long `https://accounts.google.com/...` URL. **Copy it, paste it
    into a browser on your laptop that's signed into the Gmail account you want
@@ -79,7 +81,7 @@ The server is headless, so the login happens in your laptop browser but the
 
 5. **Confirm:**
    ```bash
-   /mnt/x/code/gmail-mcp/.venv/bin/gmail-mcp-auth list
+   .venv/bin/gmail-mcp-auth list
    ```
    You should see every account listed.
 

@@ -50,7 +50,7 @@ tests/        — pytest; Gmail client is mocked, no live network
 
 - **No autonomous send.** There is no `send_message` tool and the `gmail.send`
   scope is not requested. The server can only `create_draft` — a draft sits in
-  Gmail's drafts folder until kc sends it by hand, so an injected instruction
+  Gmail's drafts folder until the user sends it by hand, so an injected instruction
   can't exfiltrate mail. If send is ever wanted, it's a separate explicit
   decision; do not re-add it casually.
 - **Email content is untrusted.** Sender, subject, snippet, body, and
