@@ -119,8 +119,8 @@ flowchart TD
         Agent[MCP client / agent]
         CLI[gmail-mcp-auth CLI]
         Server[gmail-mcp stdio server]
-        Store[(SQLite<br/>~/.gmail-mcp/tokens.db)]
-        Secret[client_secret.json<br/>one OAuth client]
+        Store[("SQLite<br/>~/.gmail-mcp/tokens.db")]
+        Secret["client_secret.json<br/>one OAuth client"]
     end
     Google[Google OAuth + Gmail API]
 
@@ -201,13 +201,13 @@ an omitted tool. The scope list lives in one place: `SCOPES` in
 
 ```mermaid
 flowchart LR
-    Client[MCP client / agent] -->|account=a@x.com| Server[gmail_mcp.server]
-    Server --> Store[(accounts table<br/>keyed by email)]
-    Store -->|row a@x.com| CredsA[Credentials a]
-    Store -->|row b@y.com| CredsB[Credentials b]
-    CredsA --> InboxA[Gmail: a@x.com]
-    CredsB --> InboxB[Gmail: b@y.com]
-    Secret[client_secret.json<br/>one OAuth client] -.shared by all rows.-> CredsA
+    Client[MCP client / agent] -->|"account=a@x.com"| Server[gmail_mcp.server]
+    Server --> Store[("accounts table<br/>keyed by email")]
+    Store -->|"row a@x.com"| CredsA[Credentials a]
+    Store -->|"row b@y.com"| CredsB[Credentials b]
+    CredsA --> InboxA["Gmail: a@x.com"]
+    CredsB --> InboxB["Gmail: b@y.com"]
+    Secret["client_secret.json<br/>one OAuth client"] -.->|"shared by all rows"| CredsA
     Secret -.-> CredsB
 ```
 
