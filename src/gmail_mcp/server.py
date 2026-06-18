@@ -234,14 +234,34 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="modify_labels",
             description=(
-                "Add and/or remove labels on a message. Accepts label ids or "
-                "names (resolved to existing labels; it does not create new ones)."
+                "Add and/or remove labels on a SELECTION of messages — one id, a "
+                "list of ids, or a Gmail search query (act on everything it "
+                "matches). One message is just a selection of size one; there is "
+                "no separate bulk vs single. Matches are modified in batches of "
+                "1000 in a single API call each. Labels accept ids or names "
+                "(resolved to existing labels; does not create new ones). This is "
+                "the general mutator: archive = remove INBOX, mark-read = remove "
+                "UNREAD, star = add STARRED, etc. To send mail to Trash use the "
+                "`trash` tool."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
-                    "message_id": {"type": "string"},
+                    "message_id": {
+                        "type": "string",
+                        "description": "A single message id (selection of one).",
+                    },
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "An explicit list of message ids to act on.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail search query; acts on EVERY matching "
+                        "message. Mutually-exclusive-ish with message_id(s).",
+                    },
                     "add": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -253,7 +273,34 @@ async def list_tools() -> list[Tool]:
                         "description": "Label ids or names to remove.",
                     },
                 },
-                "required": ["account", "message_id"],
+                "required": ["account"],
+            },
+        ),
+        Tool(
+            name="trash",
+            description=(
+                "Move a SELECTION of messages to Trash (recoverable for 30 days; "
+                "NOT a permanent delete). Selection is one id, a list of ids, or a "
+                "Gmail query — acts on everything it matches, in batches of 1000. "
+                "Refuses an empty/absent selection so it can never trash a whole "
+                "mailbox by accident."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "message_id": {"type": "string", "description": "A single id."},
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "An explicit list of message ids.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail query; trashes EVERY match.",
+                    },
+                },
+                "required": ["account"],
             },
         ),
         Tool(
@@ -414,6 +461,8 @@ def _dispatch(name: str, args: dict) -> str:
             return _do_list_labels(args)
         case "modify_labels":
             return _do_modify_labels(args)
+        case "trash":
+            return _do_trash(args)
         case "search_all_accounts":
             return _do_search_all(args)
         case "list_filters":
@@ -519,6 +568,72 @@ def _do_list_labels(args: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Selection + batched mutation
+# ---------------------------------------------------------------------------
+#
+# Action tools operate on a SELECTION, not a single message. A selection is one
+# id, an explicit list of ids, or a Gmail query (act on every match). "Single"
+# is just a selection of size one — there is no separate bulk path. Mutations
+# go through messages.batchModify in chunks of 1000 (one API call per chunk).
+
+_BATCH = 1000
+
+
+def _all_message_ids(service: Any, query: str) -> list[str]:
+    """Return every message id matching a Gmail query, paging to exhaustion."""
+    ids: list[str] = []
+    page_token: str | None = None
+    while True:
+        resp = (
+            service.users()
+            .messages()
+            .list(userId="me", q=query, maxResults=500, pageToken=page_token)
+            .execute()
+        )
+        ids.extend(m["id"] for m in resp.get("messages", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            return ids
+
+
+def _resolve_selection(service: Any, args: dict) -> list[str]:
+    """Resolve a tool's selection args (message_id | message_ids | query) to ids.
+
+    De-dupes while preserving order. Raises ValueError if no selection is given,
+    so a query-less call can never sweep an entire mailbox.
+    """
+    ids: list[str] = []
+    if args.get("message_id"):
+        ids.append(args["message_id"])
+    if args.get("message_ids"):
+        ids.extend(args["message_ids"])
+    if args.get("query"):
+        ids.extend(_all_message_ids(service, args["query"]))
+    if not ids:
+        raise ValueError(
+            "No selection given. Provide message_id, message_ids, or a query "
+            "(a query is never allowed to be empty — that would match all mail)."
+        )
+    return list(dict.fromkeys(ids))
+
+
+def _batch_modify(
+    service: Any, ids: list[str], add_ids: list[str], remove_ids: list[str]
+) -> None:
+    """Apply a label change to many messages via batchModify, 1000 at a time."""
+    body_labels: dict[str, list[str]] = {}
+    if add_ids:
+        body_labels["addLabelIds"] = add_ids
+    if remove_ids:
+        body_labels["removeLabelIds"] = remove_ids
+    for i in range(0, len(ids), _BATCH):
+        chunk = ids[i : i + _BATCH]
+        service.users().messages().batchModify(
+            userId="me", body={"ids": chunk, **body_labels}
+        ).execute()
+
+
 def _do_modify_labels(args: dict) -> str:
     service = _service_for(args["account"])
     add = args.get("add") or []
@@ -528,17 +643,22 @@ def _do_modify_labels(args: dict) -> str:
     labels = service.users().labels().list(userId="me").execute().get("labels", [])
     add_ids = resolve_label_ids(add, labels)
     remove_ids = resolve_label_ids(remove, labels)
-    service.users().messages().modify(
-        userId="me",
-        id=args["message_id"],
-        body={"addLabelIds": add_ids, "removeLabelIds": remove_ids},
-    ).execute()
+    ids = _resolve_selection(service, args)
+    _batch_modify(service, ids, add_ids, remove_ids)
     parts = []
     if add_ids:
         parts.append(f"added {add_ids}")
     if remove_ids:
         parts.append(f"removed {remove_ids}")
-    return f"Updated labels on {args['message_id']}: {', '.join(parts)}."
+    return f"Updated labels on {len(ids)} message(s): {', '.join(parts)}."
+
+
+def _do_trash(args: dict) -> str:
+    service = _service_for(args["account"])
+    ids = _resolve_selection(service, args)
+    # Trash = add the TRASH system label (recoverable). Never batchDelete.
+    _batch_modify(service, ids, add_ids=["TRASH"], remove_ids=[])
+    return f"Moved {len(ids)} message(s) to Trash (recoverable for 30 days)."
 
 
 def _do_search_all(args: dict) -> str:

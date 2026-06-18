@@ -103,6 +103,10 @@ class FakeMessages:
         self.r["modify"] = kw
         return FakeExec({"id": kw["id"]})
 
+    def batchModify(self, **kw):  # noqa: N802 — mirrors the Gmail client method
+        self.r["batchModify"] = kw
+        return FakeExec({})
+
 
 class FakeLabels:
     def list(self, **kw):
@@ -204,8 +208,43 @@ def test_modify_labels_resolves_names(fake_service):
         "account": "a@example.com", "message_id": "m1", "add": ["Receipts"],
     })
     assert "Label_5" in out
-    body = fake_service.recorder["modify"]["body"]
+    assert "1 message(s)" in out
+    body = fake_service.recorder["batchModify"]["body"]
+    assert body["ids"] == ["m1"]
     assert body["addLabelIds"] == ["Label_5"]
+
+
+def test_modify_labels_by_query(fake_service):
+    # The fake list() returns m1, m2 for any query.
+    server._dispatch("modify_labels", {
+        "account": "a@example.com", "query": "older_than:1y", "remove": ["INBOX"],
+    })
+    body = fake_service.recorder["batchModify"]["body"]
+    assert body["ids"] == ["m1", "m2"]
+    assert body["removeLabelIds"] == ["INBOX"]
+
+
+def test_trash_by_ids(fake_service):
+    out = server._dispatch("trash", {
+        "account": "a@example.com", "message_ids": ["m1", "m2"],
+    })
+    assert "2 message(s)" in out
+    body = fake_service.recorder["batchModify"]["body"]
+    assert body["ids"] == ["m1", "m2"]
+    assert body["addLabelIds"] == ["TRASH"]
+
+
+def test_trash_by_query(fake_service):
+    out = server._dispatch("trash", {
+        "account": "a@example.com", "query": "from:spam@x.com",
+    })
+    assert "2 message(s)" in out
+    assert fake_service.recorder["batchModify"]["body"]["addLabelIds"] == ["TRASH"]
+
+
+def test_trash_requires_selection(fake_service):
+    with pytest.raises(ValueError, match="No selection"):
+        server._dispatch("trash", {"account": "a@example.com"})
 
 
 def test_modify_labels_unknown_name(fake_service):
