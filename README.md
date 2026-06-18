@@ -82,9 +82,10 @@ one-command flow as the first.
 daemon, no keyring dependency, no cloud. Back it up by copying it; revoke an
 account by deleting a row; inspect it with any SQLite tool.
 
-**Least privilege.** Three granular scopes — `gmail.readonly`, `gmail.compose`,
-`gmail.modify` — never the full-mailbox `https://mail.google.com/`. It can read,
-draft, and label; it can't delete mail.
+**Least privilege.** Four granular scopes — `gmail.readonly`, `gmail.compose`,
+`gmail.modify`, `gmail.settings.basic` — never the full-mailbox
+`https://mail.google.com/`. It can read, draft, label, and manage filters; it
+never sends mail, and filters it creates can't forward mail off-account.
 
 **Headless-friendly.** The auth flow assumes the server may have no browser: it
 prints a consent URL, binds a fixed port, and you SSH-forward the redirect. Works
@@ -108,6 +109,9 @@ Every tool except `list_accounts` and `search_all_accounts` takes an `account`
 | `list_drafts` | `account`, `max_results=20` | Draft ids in the account. |
 | `list_labels` | `account` | The account's labels (name + id). |
 | `modify_labels` | `account`, `message_id`, `add?`, `remove?` | Add/remove labels by id **or** name (resolves existing labels; won't create). |
+| `list_filters` | `account` | The account's filters: id, criteria, actions (label ids shown as names). |
+| `create_filter` | `account`, one of `from_address`/`to_address`/`subject`/`query`/`has_attachment`, plus an action (`archive`/`mark_read`/`delete`/`star` or `add_labels`/`remove_labels`) | A server-side rule applied to **incoming** mail. Can't forward off-account. |
+| `delete_filter` | `account`, `filter_id` | Remove a filter by id (leaves already-acted-on mail alone). |
 
 ---
 
@@ -169,7 +173,7 @@ it. `gmail-mcp` pins this to a fixed port (default `8765`, override with
 `GMAIL_MCP_OAUTH_PORT`) and runs with `open_browser=False` so it works on
 machines with no browser — see [The headless auth path](#the-headless-auth-path).
 
-**Scopes requested.** Three granular scopes — never the full-mailbox
+**Scopes requested.** Four granular scopes — never the full-mailbox
 `https://mail.google.com/`:
 
 | Scope | What it grants |
@@ -177,11 +181,18 @@ machines with no browser — see [The headless auth path](#the-headless-auth-pat
 | `gmail.readonly` | Read mail and metadata: search messages/threads, read bodies, list labels and drafts. Read-only — cannot modify anything. |
 | `gmail.compose` | Create, update, and manage drafts. Used only by `create_draft`. |
 | `gmail.modify` | Add/remove labels on messages. Used by `modify_labels`. |
+| `gmail.settings.basic` | List, create, and delete filters. Used by `list_filters`/`create_filter`/`delete_filter`. Does **not** grant forwarding-address changes (that's `gmail.settings.sharing`, not requested). |
 
 `gmail.send` is not requested. Without it the credential simply has no Gmail API
 path to send mail — the drafts-only behavior is a property of the grant, not just
-an omitted tool. The scope list lives in one place: `SCOPES` in
-`src/gmail_mcp/config.py`.
+an omitted tool. `gmail.settings.sharing` is likewise not requested, so no filter
+can forward mail to another address. The scope list lives in one place: `SCOPES`
+in `src/gmail_mcp/config.py`.
+
+> **Adding the filter scope to an existing install:** widening `SCOPES` does not
+> retro-grant already-authorized accounts. Each account must re-run
+> `gmail-mcp-auth add` to re-consent to the new scope; until it does, the filter
+> tools return a `403 insufficient scope` error.
 
 ### The multi-account model
 

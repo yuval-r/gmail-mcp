@@ -108,8 +108,41 @@ class FakeLabels:
     def list(self, **kw):
         return FakeExec({"labels": [
             {"id": "INBOX", "name": "INBOX"},
+            {"id": "TRASH", "name": "TRASH"},
+            {"id": "UNREAD", "name": "UNREAD"},
+            {"id": "STARRED", "name": "STARRED"},
             {"id": "Label_5", "name": "Receipts"},
         ]})
+
+
+class FakeFilters:
+    def __init__(self, recorder):
+        self.r = recorder
+
+    def list(self, **kw):
+        return FakeExec({"filter": [
+            {
+                "id": "filt_1",
+                "criteria": {"from": "noise@x.com"},
+                "action": {"addLabelIds": ["TRASH"], "removeLabelIds": ["INBOX"]},
+            },
+        ]})
+
+    def create(self, **kw):
+        self.r["filter_create"] = kw
+        return FakeExec({"id": "filt_new", **kw.get("body", {})})
+
+    def delete(self, **kw):
+        self.r["filter_delete"] = kw
+        return FakeExec({})
+
+
+class FakeSettings:
+    def __init__(self, recorder):
+        self.r = recorder
+
+    def filters(self):
+        return FakeFilters(self.r)
 
 
 class FakeUsers:
@@ -121,6 +154,9 @@ class FakeUsers:
 
     def labels(self):
         return FakeLabels()
+
+    def settings(self):
+        return FakeSettings(self.r)
 
 
 class FakeService:
@@ -204,6 +240,71 @@ def test_search_all_accounts(store, monkeypatch):
 def test_search_all_accounts_none(store):
     out = server._dispatch("search_all_accounts", {"query": "test"})
     assert "No accounts authorized" in out
+
+
+# --- filters ----------------------------------------------------------------
+
+def test_list_filters_dispatch(fake_service):
+    out = server._dispatch("list_filters", {"account": "a@example.com"})
+    assert "filt_1" in out
+    assert "from=noise@x.com" in out
+    # Label ids are rendered as names.
+    assert "TRASH" in out and "INBOX" in out
+
+
+def test_create_filter_convenience_flags(fake_service):
+    out = server._dispatch("create_filter", {
+        "account": "a@example.com",
+        "from_address": "spam@x.com OR promo@y.com",
+        "delete": True,
+    })
+    assert "filt_new" in out
+    body = fake_service.recorder["filter_create"]["body"]
+    assert body["criteria"] == {"from": "spam@x.com OR promo@y.com"}
+    assert body["action"]["addLabelIds"] == ["TRASH"]
+
+
+def test_create_filter_archive_and_label(fake_service):
+    server._dispatch("create_filter", {
+        "account": "a@example.com",
+        "subject": "receipt",
+        "archive": True,
+        "mark_read": True,
+        "add_labels": ["Receipts"],
+    })
+    body = fake_service.recorder["filter_create"]["body"]
+    assert body["criteria"] == {"subject": "receipt"}
+    assert body["action"]["addLabelIds"] == ["Label_5"]
+    assert set(body["action"]["removeLabelIds"]) == {"INBOX", "UNREAD"}
+
+
+def test_create_filter_requires_criteria(fake_service):
+    out = server._dispatch("create_filter", {"account": "a@example.com", "delete": True})
+    assert "no criteria" in out
+    assert "filter_create" not in fake_service.recorder
+
+
+def test_create_filter_requires_action(fake_service):
+    out = server._dispatch("create_filter", {
+        "account": "a@example.com", "from_address": "x@y.com",
+    })
+    assert "no action" in out
+    assert "filter_create" not in fake_service.recorder
+
+
+def test_create_filter_unknown_label(fake_service):
+    with pytest.raises(ValueError, match="Unknown label"):
+        server._dispatch("create_filter", {
+            "account": "a@example.com", "subject": "x", "add_labels": ["Nope"],
+        })
+
+
+def test_delete_filter_dispatch(fake_service):
+    out = server._dispatch("delete_filter", {
+        "account": "a@example.com", "filter_id": "filt_1",
+    })
+    assert "filt_1" in out
+    assert fake_service.recorder["filter_delete"]["id"] == "filt_1"
 
 
 def test_unknown_tool():

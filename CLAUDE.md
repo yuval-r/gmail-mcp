@@ -43,8 +43,11 @@ tests/        — pytest; Gmail client is mocked, no live network
 - **Refresh**: google-auth's `Request` transport refreshes the access token
   on demand; `build_service` persists the refreshed blob back to the DB.
 - **Scopes** (one constant, `config.SCOPES`): `gmail.readonly`,
-  `gmail.compose`, `gmail.modify`. Granular — NOT full `mail.google.com`,
-  and **no `gmail.send`** (see Security model).
+  `gmail.compose`, `gmail.modify`, `gmail.settings.basic`. Granular — NOT full
+  `mail.google.com`, and **no `gmail.send`** / **no `gmail.settings.sharing`**
+  (see Security model). Widening `SCOPES` does NOT retro-grant existing
+  accounts — each must re-run `gmail-mcp-auth add` to re-consent, or the new
+  tool returns `403 insufficient scope`.
 
 ## Security model
 
@@ -61,6 +64,11 @@ tests/        — pytest; Gmail client is mocked, no live network
   clean. Read-tool descriptions also carry `_UNTRUSTED_NOTICE` so the model is
   warned in-band. When adding a tool that surfaces message content, route it
   through the shared formatters / `wrap_untrusted`.
+- **No off-account forwarding.** The filter tools (`create_filter` et al.) run
+  on `gmail.settings.basic`, which manages filters but cannot set a forwarding
+  address (that needs `gmail.settings.sharing`, deliberately not requested).
+  `create_filter` exposes label/archive/trash/star actions only — never the
+  filter `forward` action — so a filter can't exfiltrate mail. Keep it that way.
 - **No audit log** — intentionally not implemented.
 
 ## Gotchas

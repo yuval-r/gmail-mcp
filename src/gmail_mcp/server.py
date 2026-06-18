@@ -272,6 +272,105 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"],
             },
         ),
+        Tool(
+            name="list_filters",
+            description=(
+                "List the account's Gmail filters (server-side rules that act on "
+                "incoming mail). Each filter shows its id, match criteria, and "
+                "actions, with label ids resolved to names. Use the id with "
+                "delete_filter."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"account": _ACCOUNT_PROP},
+                "required": ["account"],
+            },
+        ),
+        Tool(
+            name="create_filter",
+            description=(
+                "Create a Gmail filter that auto-acts on matching incoming mail "
+                "(the durable fix for recurring newsletter/promo noise — unlike "
+                "modify_labels, which only touches existing messages). Supply at "
+                "least one match criterion (from_address/to_address/subject/query/"
+                "has_attachment) and at least one action. Actions: convenience "
+                "flags archive/mark_read/delete/star, plus add_labels/remove_labels "
+                "for any other label (names or ids, must already exist). Filters "
+                "cannot forward mail off-account by design. Note: a filter only "
+                "affects mail that ARRIVES after it's created; clear existing "
+                "backlog with search + modify_labels."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "from_address": {
+                        "type": "string",
+                        "description": "Match sender (criteria 'from'). Accepts a "
+                        "Gmail from-expression, e.g. 'a@b.com OR c@d.com'.",
+                    },
+                    "to_address": {
+                        "type": "string",
+                        "description": "Match recipient (criteria 'to').",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Match words in the subject.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Raw Gmail search expression for arbitrary "
+                        "criteria, e.g. 'list:promotions.example.com'.",
+                    },
+                    "has_attachment": {
+                        "type": "boolean",
+                        "description": "Only match messages with an attachment.",
+                    },
+                    "archive": {
+                        "type": "boolean",
+                        "description": "Skip the Inbox (removes INBOX label).",
+                    },
+                    "mark_read": {
+                        "type": "boolean",
+                        "description": "Mark as read (removes UNREAD label).",
+                    },
+                    "delete": {
+                        "type": "boolean",
+                        "description": "Send to Trash (adds TRASH label).",
+                    },
+                    "star": {
+                        "type": "boolean",
+                        "description": "Star it (adds STARRED label).",
+                    },
+                    "add_labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Labels to apply (names or ids; must exist).",
+                    },
+                    "remove_labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Labels to remove (names or ids; must exist).",
+                    },
+                },
+                "required": ["account"],
+            },
+        ),
+        Tool(
+            name="delete_filter",
+            description=(
+                "Delete a Gmail filter by id (does not touch mail it already "
+                "acted on). Get ids from list_filters."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "filter_id": {"type": "string", "description": "Gmail filter id."},
+                },
+                "required": ["account", "filter_id"],
+            },
+        ),
     ]
 
 
@@ -317,6 +416,12 @@ def _dispatch(name: str, args: dict) -> str:
             return _do_modify_labels(args)
         case "search_all_accounts":
             return _do_search_all(args)
+        case "list_filters":
+            return _do_list_filters(args)
+        case "create_filter":
+            return _do_create_filter(args)
+        case "delete_filter":
+            return _do_delete_filter(args)
         case _:
             return f"Unknown tool: {name}"
 
@@ -454,6 +559,118 @@ def _do_search_all(args: dict) -> str:
             status = getattr(e.resp, "status", "?")
             blocks.append(f"{acct.email}: Gmail API error {status} — {e.reason}")
     return ("\n\n" + "=" * 60 + "\n\n").join(blocks)
+
+
+# ---------------------------------------------------------------------------
+# Filters (settings.basic scope)
+# ---------------------------------------------------------------------------
+#
+# A Gmail filter is a server-side rule Google applies to mail as it ARRIVES —
+# the durable complement to modify_labels (which only touches existing mail).
+# We expose label/archive/trash actions but deliberately NOT forwarding: the
+# settings.sharing scope needed to set a forwarding address is not requested,
+# so a filter created here can never exfiltrate mail to another address.
+
+def _label_names(label_ids: list[str], by_id: dict[str, str]) -> str:
+    """Render a list of label ids as readable names (falling back to the id)."""
+    return ", ".join(by_id.get(lid, lid) for lid in label_ids)
+
+
+def _do_list_filters(args: dict) -> str:
+    service = _service_for(args["account"])
+    resp = service.users().settings().filters().list(userId="me").execute()
+    filters = resp.get("filter", [])
+    if not filters:
+        return f"No filters in {args['account']}."
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    by_id = {lbl["id"]: lbl["name"] for lbl in labels}
+    lines = [f"{len(filters)} filter(s) in {args['account']}:"]
+    for flt in filters:
+        crit = flt.get("criteria", {})
+        act = flt.get("action", {})
+        crit_str = ", ".join(f"{k}={v}" for k, v in crit.items()) or "(any)"
+        act_parts: list[str] = []
+        if act.get("addLabelIds"):
+            act_parts.append(f"+[{_label_names(act['addLabelIds'], by_id)}]")
+        if act.get("removeLabelIds"):
+            act_parts.append(f"-[{_label_names(act['removeLabelIds'], by_id)}]")
+        if act.get("forward"):
+            act_parts.append(f"forward->{act['forward']}")
+        act_str = ", ".join(act_parts) or "(no action)"
+        lines.append(f"  [{flt.get('id')}] if ({crit_str}) then {act_str}")
+    return "\n".join(lines)
+
+
+def _do_create_filter(args: dict) -> str:
+    service = _service_for(args["account"])
+
+    criteria: dict[str, Any] = {}
+    if args.get("from_address"):
+        criteria["from"] = args["from_address"]
+    if args.get("to_address"):
+        criteria["to"] = args["to_address"]
+    if args.get("subject"):
+        criteria["subject"] = args["subject"]
+    if args.get("query"):
+        criteria["query"] = args["query"]
+    if args.get("has_attachment"):
+        criteria["hasAttachment"] = True
+    if not criteria:
+        return (
+            "Refusing to create a filter with no criteria — it would match ALL "
+            "mail. Provide at least one of from_address/to_address/subject/query/"
+            "has_attachment."
+        )
+
+    add = list(args.get("add_labels") or [])
+    remove = list(args.get("remove_labels") or [])
+    if args.get("delete"):
+        add.append("TRASH")
+    if args.get("star"):
+        add.append("STARRED")
+    if args.get("archive"):
+        remove.append("INBOX")
+    if args.get("mark_read"):
+        remove.append("UNREAD")
+    if not add and not remove:
+        return (
+            "Refusing to create a filter with no action. Set one of "
+            "archive/mark_read/delete/star, or add_labels/remove_labels."
+        )
+
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    # Resolve + de-dupe while preserving order (resolve_label_ids raises on
+    # an unknown name, listing the valid ones).
+    add_ids = list(dict.fromkeys(resolve_label_ids(add, labels))) if add else []
+    remove_ids = (
+        list(dict.fromkeys(resolve_label_ids(remove, labels))) if remove else []
+    )
+
+    action: dict[str, Any] = {}
+    if add_ids:
+        action["addLabelIds"] = add_ids
+    if remove_ids:
+        action["removeLabelIds"] = remove_ids
+
+    created = (
+        service.users()
+        .settings()
+        .filters()
+        .create(userId="me", body={"criteria": criteria, "action": action})
+        .execute()
+    )
+    return (
+        f"Created filter {created.get('id')} in {args['account']}: "
+        f"if {criteria} then {action}. Applies to mail arriving from now on."
+    )
+
+
+def _do_delete_filter(args: dict) -> str:
+    service = _service_for(args["account"])
+    service.users().settings().filters().delete(
+        userId="me", id=args["filter_id"]
+    ).execute()
+    return f"Deleted filter {args['filter_id']} from {args['account']}."
 
 
 # ---------------------------------------------------------------------------
