@@ -109,6 +109,17 @@ def _search(service: Any, query: str, max_results: int) -> list[dict[str, str]]:
     return [_summarize_message(service, mid) for mid in ids]
 
 
+def _search_ids(service: Any, query: str, max_results: int) -> list[str]:
+    """Return up to max_results message ids matching a query (no content fetch)."""
+    resp = (
+        service.users()
+        .messages()
+        .list(userId="me", q=query, maxResults=max_results)
+        .execute()
+    )
+    return [m["id"] for m in resp.get("messages", [])]
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
@@ -418,6 +429,100 @@ async def list_tools() -> list[Tool]:
                 "required": ["account", "filter_id"],
             },
         ),
+        Tool(
+            name="bulk_action",
+            description=(
+                "Apply a named action to a SELECTION of messages in one call — the "
+                "friendly verb layer over modify_labels (no need to remember system "
+                "label names). Selection is one id, a list of ids, or a Gmail query "
+                "(acts on EVERY match, in batches of 1000). Verbs: archive "
+                "(remove from Inbox), unarchive, mark_read, mark_unread, star, "
+                "unstar, spam, unspam, trash (recoverable 30d), untrash. Refuses an "
+                "empty/absent selection so it can never sweep a whole mailbox. Tip: "
+                "run count_messages on the same query first to see the blast radius."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "archive", "unarchive", "mark_read", "mark_unread",
+                            "star", "unstar", "spam", "unspam", "trash", "untrash",
+                        ],
+                        "description": "The action verb to apply to the selection.",
+                    },
+                    "message_id": {"type": "string", "description": "A single id."},
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "An explicit list of message ids.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail query; acts on EVERY match.",
+                    },
+                },
+                "required": ["account", "action"],
+            },
+        ),
+        Tool(
+            name="read_messages",
+            description=(
+                "Batch-read the full content (headers, plaintext body, attachment "
+                "metadata) of MANY messages in one call — use instead of calling "
+                "read_message repeatedly. Selection is a list of ids or a Gmail "
+                "query (capped by max_results, default 25, to keep output bounded)."
+                + _UNTRUSTED_NOTICE
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Explicit list of message ids to read.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail query; reads the first max_results matches.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Max messages to read (default 25).",
+                        "default": 25,
+                    },
+                },
+                "required": ["account"],
+            },
+        ),
+        Tool(
+            name="count_messages",
+            description=(
+                "Count how many messages match a Gmail query WITHOUT fetching their "
+                "content — the blast-radius check to run before a bulk_action or "
+                "trash. Set all_accounts=true to count across every authorized "
+                "account and get a per-account breakdown plus a total."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {
+                        "type": "string",
+                        "description": "Account to count in (ignored if all_accounts).",
+                    },
+                    "query": {"type": "string", "description": "Gmail search query."},
+                    "all_accounts": {
+                        "type": "boolean",
+                        "description": "Count across every authorized account.",
+                        "default": False,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
     ]
 
 
@@ -471,6 +576,12 @@ def _dispatch(name: str, args: dict) -> str:
             return _do_create_filter(args)
         case "delete_filter":
             return _do_delete_filter(args)
+        case "bulk_action":
+            return _do_bulk_action(args)
+        case "read_messages":
+            return _do_read_messages(args)
+        case "count_messages":
+            return _do_count_messages(args)
         case _:
             return f"Unknown tool: {name}"
 
@@ -659,6 +770,87 @@ def _do_trash(args: dict) -> str:
     # Trash = add the TRASH system label (recoverable). Never batchDelete.
     _batch_modify(service, ids, add_ids=["TRASH"], remove_ids=[])
     return f"Moved {len(ids)} message(s) to Trash (recoverable for 30 days)."
+
+
+# Verb -> (system labels to add, system labels to remove). The friendly action
+# layer over batchModify: every Gmail "action" is really a system-label flip.
+_ACTION_LABELS: dict[str, tuple[list[str], list[str]]] = {
+    "archive": ([], ["INBOX"]),
+    "unarchive": (["INBOX"], []),
+    "mark_read": ([], ["UNREAD"]),
+    "mark_unread": (["UNREAD"], []),
+    "star": (["STARRED"], []),
+    "unstar": ([], ["STARRED"]),
+    "spam": (["SPAM"], ["INBOX"]),
+    "unspam": (["INBOX"], ["SPAM"]),
+    "trash": (["TRASH"], []),
+    "untrash": ([], ["TRASH"]),
+}
+
+
+def _do_bulk_action(args: dict) -> str:
+    action = args.get("action", "")
+    mapping = _ACTION_LABELS.get(action)
+    if mapping is None:
+        valid = ", ".join(sorted(_ACTION_LABELS))
+        raise ValueError(f"Unknown action {action!r}. Valid actions: {valid}.")
+    add_ids, remove_ids = mapping
+    service = _service_for(args["account"])
+    ids = _resolve_selection(service, args)
+    _batch_modify(service, ids, add_ids=add_ids, remove_ids=remove_ids)
+    return f"Applied '{action}' to {len(ids)} message(s) in {args['account']}."
+
+
+def _do_read_messages(args: dict) -> str:
+    service = _service_for(args["account"])
+    cap = args.get("max_results", 25)
+    ids: list[str] = list(args.get("message_ids") or [])
+    if not ids and args.get("query"):
+        ids = _search_ids(service, args["query"], cap)
+    if not ids:
+        raise ValueError(
+            "No selection given. Provide message_ids or a query to read."
+        )
+    ids = list(dict.fromkeys(ids))[:cap]
+    blocks = [f"Read {len(ids)} message(s) from {args['account']}:\n"]
+    for mid in ids:
+        resource = (
+            service.users()
+            .messages()
+            .get(userId="me", id=mid, format="full")
+            .execute()
+        )
+        blocks.append(format_parsed_message(parse_message(resource)))
+    return ("\n\n" + "-" * 60 + "\n\n").join(blocks)
+
+
+def _count_for(service: Any, query: str) -> int:
+    """Count messages matching a query by paging ids to exhaustion."""
+    return len(_all_message_ids(service, query))
+
+
+def _do_count_messages(args: dict) -> str:
+    query = args["query"]
+    if args.get("all_accounts"):
+        accounts = get_store().list_accounts()
+        if not accounts:
+            return "No accounts authorized yet. Run `gmail-mcp-auth add` to add one."
+        lines = [f"Count of '{query}' across {len(accounts)} account(s):"]
+        total = 0
+        for acct in accounts:
+            try:
+                n = _count_for(build_service(acct, get_store()), query)
+                total += n
+                lines.append(f"  {acct.email}: {n}")
+            except (GmailAuthError, HttpError) as e:
+                lines.append(f"  {acct.email}: error — {e}")
+        lines.append(f"  TOTAL: {total}")
+        return "\n".join(lines)
+    if not args.get("account"):
+        raise ValueError("Provide 'account', or set all_accounts=true.")
+    service = _service_for(args["account"])
+    n = _count_for(service, query)
+    return f"{n} message(s) match '{query}' in {args['account']}."
 
 
 def _do_search_all(args: dict) -> str:

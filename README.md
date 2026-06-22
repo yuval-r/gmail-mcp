@@ -110,6 +110,9 @@ Every tool except `list_accounts` and `search_all_accounts` takes an `account`
 | `list_labels` | `account` | The account's labels (name + id). |
 | `modify_labels` | `account`, selection (`message_id` \| `message_ids` \| `query`), `add?`, `remove?` | Add/remove labels on a **selection** (one id, a list, or everything a query matches), batched 1000/call. General mutator: archive = remove INBOX, mark-read = remove UNREAD, star = add STARRED. |
 | `trash` | `account`, selection (`message_id` \| `message_ids` \| `query`) | Move a selection to Trash (recoverable 30 days; not permanent delete). Refuses an empty selection. |
+| `bulk_action` | `account`, `action`, selection (`message_id` \| `message_ids` \| `query`) | Friendly verb layer over `modify_labels`. `action` ∈ `archive`/`unarchive`/`mark_read`/`mark_unread`/`star`/`unstar`/`spam`/`unspam`/`trash`/`untrash`. Batched 1000/call; refuses an empty selection. |
+| `read_messages` | `account`, `message_ids` \| `query`, `max_results=25` | Batch-read full content of many messages in one call (vs. N `read_message` calls). |
+| `count_messages` | `query`, `account?`, `all_accounts=false` | Count matches **without** fetching content — blast-radius check before a bulk action. `all_accounts` gives a per-account breakdown + total. |
 | `list_filters` | `account` | The account's filters: id, criteria, actions (label ids shown as names). |
 | `create_filter` | `account`, one of `from_address`/`to_address`/`subject`/`query`/`has_attachment`, plus an action (`archive`/`mark_read`/`delete`/`star` or `add_labels`/`remove_labels`) | A server-side rule applied to **incoming** mail. Can't forward off-account. |
 | `delete_filter` | `account`, `filter_id` | Remove a filter by id (leaves already-acted-on mail alone). |
