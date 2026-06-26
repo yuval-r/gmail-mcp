@@ -1,5 +1,7 @@
 # gmail-mcp
 
+<!-- mcp-name: io.github.cunicopia-dev/multi-account-gmail-mcp -->
+
 ![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![tests: 48 passing](https://img.shields.io/badge/tests-48_passing-brightgreen)
@@ -368,7 +370,20 @@ secrets are hardcoded — `client_id`/`client_secret` come from your downloaded
 
 ## Install
 
-Requires Python 3.12+.
+Requires Python 3.12+. The PyPI distribution is **`multi-account-gmail-mcp`**
+(the bare `gmail-mcp` name is taken); it installs the `gmail-mcp` and
+`gmail-mcp-auth` commands.
+
+```bash
+# From PyPI
+pip install multi-account-gmail-mcp
+# or, to get the commands on PATH globally:
+uv tool install multi-account-gmail-mcp     # or: pipx install multi-account-gmail-mcp
+# or run without installing:
+uvx multi-account-gmail-mcp
+```
+
+From source (for development):
 
 ```bash
 git clone https://github.com/cunicopia-dev/gmail-mcp.git

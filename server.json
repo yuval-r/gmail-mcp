@@ -1,0 +1,45 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.cunicopia-dev/multi-account-gmail-mcp",
+  "title": "Multi-Account Gmail",
+  "description": "Multi-account Gmail MCP server — read, search, draft, and label across every inbox.",
+  "repository": {
+    "url": "https://github.com/cunicopia-dev/gmail-mcp",
+    "source": "github"
+  },
+  "version": "0.3.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "multi-account-gmail-mcp",
+      "version": "0.3.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "uvx",
+      "environmentVariables": [
+        {
+          "name": "GMAIL_MCP_CLIENT_SECRET",
+          "description": "Path to the Google OAuth \"Desktop app\" client-secret JSON. Defaults to ~/.gmail-mcp/client_secret.json.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "GMAIL_MCP_DB",
+          "description": "Path to the SQLite token store holding per-account refresh tokens. Defaults to ~/.gmail-mcp/tokens.db.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "GMAIL_MCP_OAUTH_PORT",
+          "description": "Localhost port for the OAuth redirect during account authorization. Defaults to 8765.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
