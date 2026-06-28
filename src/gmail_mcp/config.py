@@ -32,9 +32,11 @@ _DEFAULT_DIR = Path.home() / ".gmail-mcp"
 # Per-message body cap, in characters, applied when surfacing parsed message
 # bodies (read_message / read_thread). Long marketing mail and quoted threads
 # are the dominant token cost; capping keeps a single read from flooding the
-# model's context. ~20k chars ≈ 5k tokens. 0 or negative ⇒ unlimited. A caller
-# can override per-request, and re-fetch in full by passing max_body_chars=0.
-_DEFAULT_MAX_BODY_CHARS = 20_000
+# model's context. The default is deliberately tight (~500 chars ≈ 125 tokens —
+# enough to triage the gist) so reads are cheap by default and the agent opts
+# into a full body explicitly. 0 or negative ⇒ unlimited. A caller can override
+# per-request, and re-fetch in full by passing max_body_chars=0.
+_DEFAULT_MAX_BODY_CHARS = 500
 
 
 def db_path() -> Path:

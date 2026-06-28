@@ -406,7 +406,7 @@ All optional — sane defaults under `~/.gmail-mcp/`.
 | `GMAIL_MCP_DB` | `~/.gmail-mcp/tokens.db` | SQLite token store path. |
 | `GMAIL_MCP_CLIENT_SECRET` | `~/.gmail-mcp/client_secret.json` | Downloaded Google OAuth client. |
 | `GMAIL_MCP_OAUTH_PORT` | `8765` | Fixed loopback port for the auth flow (forward this over SSH on a headless box). |
-| `GMAIL_MCP_MAX_BODY_CHARS` | `20000` | Default per-message body cap for `read_message`/`read_thread`. `0` (or negative) means unlimited; a per-call `max_body_chars` argument overrides it. |
+| `GMAIL_MCP_MAX_BODY_CHARS` | `500` | Default per-message body cap for `read_message`/`read_thread`. Deliberately tight so reads are cheap by default; `0` (or negative) means unlimited, and a per-call `max_body_chars` argument overrides it. |
 
 ---
 
