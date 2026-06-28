@@ -18,12 +18,14 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from gmail_mcp import config
 from gmail_mcp.gmail import (
     GmailAuthError,
     build_mime_message,
     build_service,
     format_parsed_message,
     format_search_results,
+    format_thread,
     parse_message,
     resolve_label_ids,
 )
@@ -64,6 +66,19 @@ def _require_account(email: str) -> Account:
 def _service_for(email: str) -> Any:
     acct = _require_account(email)
     return build_service(acct, get_store())
+
+
+def _resolve_body_cap(args: dict) -> int | None:
+    """Resolve the per-request body cap: explicit arg wins, else config default.
+
+    Returns ``None`` (unlimited) when the resolved value is <= 0, so a caller
+    can pass ``max_body_chars=0`` to recover a full body the cap had trimmed.
+    """
+    if args.get("max_body_chars") is not None:
+        value = int(args["max_body_chars"])
+    else:
+        value = config.max_body_chars()
+    return value if value > 0 else None
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +144,14 @@ _ACCOUNT_PROP = {
     "description": "Email address of the authorized Gmail account to act on.",
 }
 
+_MAX_BODY_PROP = {
+    "type": "integer",
+    "description": (
+        "Max characters of each message body to return. Omit for the server "
+        "default; pass 0 for the full, untruncated body."
+    ),
+}
+
 # Standing instruction appended to every tool that returns email content.
 # The model sees this in the tool description before it ever reads a message.
 _UNTRUSTED_NOTICE = (
@@ -175,8 +198,9 @@ async def list_tools() -> list[Tool]:
             name="read_message",
             description=(
                 "Read a single message: decoded headers, plaintext body "
-                "(HTML stripped if no plaintext part), and attachment metadata."
-                + _UNTRUSTED_NOTICE
+                "(HTML stripped if no plaintext part), and attachment metadata. "
+                "Long bodies are truncated by default; pass max_body_chars=0 to "
+                "get the full body." + _UNTRUSTED_NOTICE
             ),
             inputSchema={
                 "type": "object",
@@ -188,18 +212,24 @@ async def list_tools() -> list[Tool]:
                         "description": "Gmail get format (default 'full').",
                         "default": "full",
                     },
+                    "max_body_chars": _MAX_BODY_PROP,
                 },
                 "required": ["account", "message_id"],
             },
         ),
         Tool(
             name="read_thread",
-            description="Read every message in a thread, in order." + _UNTRUSTED_NOTICE,
+            description=(
+                "Read every message in a thread, in order. Long bodies are "
+                "truncated by default; pass max_body_chars=0 for full bodies."
+                + _UNTRUSTED_NOTICE
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
                     "thread_id": {"type": "string", "description": "Gmail thread id."},
+                    "max_body_chars": _MAX_BODY_PROP,
                 },
                 "required": ["account", "thread_id"],
             },
@@ -610,7 +640,7 @@ def _do_read_message(args: dict) -> str:
         .get(userId="me", id=args["message_id"], format=args.get("format", "full"))
         .execute()
     )
-    return format_parsed_message(parse_message(resource))
+    return format_parsed_message(parse_message(resource), _resolve_body_cap(args))
 
 
 def _do_read_thread(args: dict) -> str:
@@ -621,12 +651,8 @@ def _do_read_thread(args: dict) -> str:
         .get(userId="me", id=args["thread_id"], format="full")
         .execute()
     )
-    messages = thread.get("messages", [])
-    if not messages:
-        return f"Thread {args['thread_id']} has no messages."
-    blocks = [f"Thread {args['thread_id']} — {len(messages)} message(s):\n"]
-    blocks.extend(format_parsed_message(parse_message(m)) for m in messages)
-    return ("\n\n" + "-" * 60 + "\n\n").join(blocks)
+    messages = [parse_message(m) for m in thread.get("messages", [])]
+    return format_thread(args["thread_id"], messages, _resolve_body_cap(args))
 
 
 def _do_create_draft(args: dict) -> str:

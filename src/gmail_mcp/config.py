@@ -35,6 +35,15 @@ SCOPES: list[str] = [
 
 _DEFAULT_DIR = Path.home() / ".gmail-mcp"
 
+# Per-message body cap, in characters, applied when surfacing parsed message
+# bodies (read_message / read_thread). Long marketing mail and quoted threads
+# are the dominant token cost; capping keeps a single read from flooding the
+# model's context. The default is deliberately tight (~500 chars ≈ 125 tokens —
+# enough to triage the gist) so reads are cheap by default and the agent opts
+# into a full body explicitly. 0 or negative ⇒ unlimited. A caller can override
+# per-request, and re-fetch in full by passing max_body_chars=0.
+_DEFAULT_MAX_BODY_CHARS = 500
+
 
 def db_path() -> Path:
     """Path to the SQLite token store.
@@ -57,3 +66,19 @@ def client_secret_path() -> Path:
     if override:
         return Path(override).expanduser()
     return _DEFAULT_DIR / "client_secret.json"
+
+
+def max_body_chars() -> int:
+    """Default per-message body cap in characters.
+
+    Honors ``GMAIL_MCP_MAX_BODY_CHARS``; defaults to
+    ``_DEFAULT_MAX_BODY_CHARS``. A value <= 0 means unlimited. A malformed
+    value falls back to the default rather than crashing the server.
+    """
+    raw = os.environ.get("GMAIL_MCP_MAX_BODY_CHARS")
+    if raw is None:
+        return _DEFAULT_MAX_BODY_CHARS
+    try:
+        return int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_BODY_CHARS
