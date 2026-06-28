@@ -124,6 +124,17 @@ def _search(service: Any, query: str, max_results: int) -> list[dict[str, str]]:
     return [_summarize_message(service, mid) for mid in ids]
 
 
+def _search_ids(service: Any, query: str, max_results: int) -> list[str]:
+    """Return up to max_results message ids matching a query (no content fetch)."""
+    resp = (
+        service.users()
+        .messages()
+        .list(userId="me", q=query, maxResults=max_results)
+        .execute()
+    )
+    return [m["id"] for m in resp.get("messages", [])]
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
@@ -264,14 +275,34 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="modify_labels",
             description=(
-                "Add and/or remove labels on a message. Accepts label ids or "
-                "names (resolved to existing labels; it does not create new ones)."
+                "Add and/or remove labels on a SELECTION of messages — one id, a "
+                "list of ids, or a Gmail search query (act on everything it "
+                "matches). One message is just a selection of size one; there is "
+                "no separate bulk vs single. Matches are modified in batches of "
+                "1000 in a single API call each. Labels accept ids or names "
+                "(resolved to existing labels; does not create new ones). This is "
+                "the general mutator: archive = remove INBOX, mark-read = remove "
+                "UNREAD, star = add STARRED, etc. To send mail to Trash use the "
+                "`trash` tool."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
-                    "message_id": {"type": "string"},
+                    "message_id": {
+                        "type": "string",
+                        "description": "A single message id (selection of one).",
+                    },
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "An explicit list of message ids to act on.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail search query; acts on EVERY matching "
+                        "message. Mutually-exclusive-ish with message_id(s).",
+                    },
                     "add": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -283,7 +314,34 @@ async def list_tools() -> list[Tool]:
                         "description": "Label ids or names to remove.",
                     },
                 },
-                "required": ["account", "message_id"],
+                "required": ["account"],
+            },
+        ),
+        Tool(
+            name="trash",
+            description=(
+                "Move a SELECTION of messages to Trash (recoverable for 30 days; "
+                "NOT a permanent delete). Selection is one id, a list of ids, or a "
+                "Gmail query — acts on everything it matches, in batches of 1000. "
+                "Refuses an empty/absent selection so it can never trash a whole "
+                "mailbox by accident."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "message_id": {"type": "string", "description": "A single id."},
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "An explicit list of message ids.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail query; trashes EVERY match.",
+                    },
+                },
+                "required": ["account"],
             },
         ),
         Tool(
@@ -298,6 +356,199 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "query": {"type": "string", "description": "Gmail search query."},
                     "max_results_per_account": {"type": "integer", "default": 10},
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="list_filters",
+            description=(
+                "List the account's Gmail filters (server-side rules that act on "
+                "incoming mail). Each filter shows its id, match criteria, and "
+                "actions, with label ids resolved to names. Use the id with "
+                "delete_filter."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"account": _ACCOUNT_PROP},
+                "required": ["account"],
+            },
+        ),
+        Tool(
+            name="create_filter",
+            description=(
+                "Create a Gmail filter that auto-acts on matching incoming mail "
+                "(the durable fix for recurring newsletter/promo noise — unlike "
+                "modify_labels, which only touches existing messages). Supply at "
+                "least one match criterion (from_address/to_address/subject/query/"
+                "has_attachment) and at least one action. Actions: convenience "
+                "flags archive/mark_read/delete/star, plus add_labels/remove_labels "
+                "for any other label (names or ids, must already exist). Filters "
+                "cannot forward mail off-account by design. Note: a filter only "
+                "affects mail that ARRIVES after it's created; clear existing "
+                "backlog with search + modify_labels."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "from_address": {
+                        "type": "string",
+                        "description": "Match sender (criteria 'from'). Accepts a "
+                        "Gmail from-expression, e.g. 'a@b.com OR c@d.com'.",
+                    },
+                    "to_address": {
+                        "type": "string",
+                        "description": "Match recipient (criteria 'to').",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Match words in the subject.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Raw Gmail search expression for arbitrary "
+                        "criteria, e.g. 'list:promotions.example.com'.",
+                    },
+                    "has_attachment": {
+                        "type": "boolean",
+                        "description": "Only match messages with an attachment.",
+                    },
+                    "archive": {
+                        "type": "boolean",
+                        "description": "Skip the Inbox (removes INBOX label).",
+                    },
+                    "mark_read": {
+                        "type": "boolean",
+                        "description": "Mark as read (removes UNREAD label).",
+                    },
+                    "delete": {
+                        "type": "boolean",
+                        "description": "Send to Trash (adds TRASH label).",
+                    },
+                    "star": {
+                        "type": "boolean",
+                        "description": "Star it (adds STARRED label).",
+                    },
+                    "add_labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Labels to apply (names or ids; must exist).",
+                    },
+                    "remove_labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Labels to remove (names or ids; must exist).",
+                    },
+                },
+                "required": ["account"],
+            },
+        ),
+        Tool(
+            name="delete_filter",
+            description=(
+                "Delete a Gmail filter by id (does not touch mail it already "
+                "acted on). Get ids from list_filters."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "filter_id": {"type": "string", "description": "Gmail filter id."},
+                },
+                "required": ["account", "filter_id"],
+            },
+        ),
+        Tool(
+            name="bulk_action",
+            description=(
+                "Apply a named action to a SELECTION of messages in one call — the "
+                "friendly verb layer over modify_labels (no need to remember system "
+                "label names). Selection is one id, a list of ids, or a Gmail query "
+                "(acts on EVERY match, in batches of 1000). Verbs: archive "
+                "(remove from Inbox), unarchive, mark_read, mark_unread, star, "
+                "unstar, spam, unspam, trash (recoverable 30d), untrash. Refuses an "
+                "empty/absent selection so it can never sweep a whole mailbox. Tip: "
+                "run count_messages on the same query first to see the blast radius."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "archive", "unarchive", "mark_read", "mark_unread",
+                            "star", "unstar", "spam", "unspam", "trash", "untrash",
+                        ],
+                        "description": "The action verb to apply to the selection.",
+                    },
+                    "message_id": {"type": "string", "description": "A single id."},
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "An explicit list of message ids.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail query; acts on EVERY match.",
+                    },
+                },
+                "required": ["account", "action"],
+            },
+        ),
+        Tool(
+            name="read_messages",
+            description=(
+                "Batch-read the full content (headers, plaintext body, attachment "
+                "metadata) of MANY messages in one call — use instead of calling "
+                "read_message repeatedly. Selection is a list of ids or a Gmail "
+                "query (capped by max_results, default 25, to keep output bounded)."
+                + _UNTRUSTED_NOTICE
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": _ACCOUNT_PROP,
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Explicit list of message ids to read.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail query; reads the first max_results matches.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Max messages to read (default 25).",
+                        "default": 25,
+                    },
+                },
+                "required": ["account"],
+            },
+        ),
+        Tool(
+            name="count_messages",
+            description=(
+                "Count how many messages match a Gmail query WITHOUT fetching their "
+                "content — the blast-radius check to run before a bulk_action or "
+                "trash. Set all_accounts=true to count across every authorized "
+                "account and get a per-account breakdown plus a total."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {
+                        "type": "string",
+                        "description": "Account to count in (ignored if all_accounts).",
+                    },
+                    "query": {"type": "string", "description": "Gmail search query."},
+                    "all_accounts": {
+                        "type": "boolean",
+                        "description": "Count across every authorized account.",
+                        "default": False,
+                    },
                 },
                 "required": ["query"],
             },
@@ -345,8 +596,22 @@ def _dispatch(name: str, args: dict) -> str:
             return _do_list_labels(args)
         case "modify_labels":
             return _do_modify_labels(args)
+        case "trash":
+            return _do_trash(args)
         case "search_all_accounts":
             return _do_search_all(args)
+        case "list_filters":
+            return _do_list_filters(args)
+        case "create_filter":
+            return _do_create_filter(args)
+        case "delete_filter":
+            return _do_delete_filter(args)
+        case "bulk_action":
+            return _do_bulk_action(args)
+        case "read_messages":
+            return _do_read_messages(args)
+        case "count_messages":
+            return _do_count_messages(args)
         case _:
             return f"Unknown tool: {name}"
 
@@ -440,6 +705,72 @@ def _do_list_labels(args: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Selection + batched mutation
+# ---------------------------------------------------------------------------
+#
+# Action tools operate on a SELECTION, not a single message. A selection is one
+# id, an explicit list of ids, or a Gmail query (act on every match). "Single"
+# is just a selection of size one — there is no separate bulk path. Mutations
+# go through messages.batchModify in chunks of 1000 (one API call per chunk).
+
+_BATCH = 1000
+
+
+def _all_message_ids(service: Any, query: str) -> list[str]:
+    """Return every message id matching a Gmail query, paging to exhaustion."""
+    ids: list[str] = []
+    page_token: str | None = None
+    while True:
+        resp = (
+            service.users()
+            .messages()
+            .list(userId="me", q=query, maxResults=500, pageToken=page_token)
+            .execute()
+        )
+        ids.extend(m["id"] for m in resp.get("messages", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            return ids
+
+
+def _resolve_selection(service: Any, args: dict) -> list[str]:
+    """Resolve a tool's selection args (message_id | message_ids | query) to ids.
+
+    De-dupes while preserving order. Raises ValueError if no selection is given,
+    so a query-less call can never sweep an entire mailbox.
+    """
+    ids: list[str] = []
+    if args.get("message_id"):
+        ids.append(args["message_id"])
+    if args.get("message_ids"):
+        ids.extend(args["message_ids"])
+    if args.get("query"):
+        ids.extend(_all_message_ids(service, args["query"]))
+    if not ids:
+        raise ValueError(
+            "No selection given. Provide message_id, message_ids, or a query "
+            "(a query is never allowed to be empty — that would match all mail)."
+        )
+    return list(dict.fromkeys(ids))
+
+
+def _batch_modify(
+    service: Any, ids: list[str], add_ids: list[str], remove_ids: list[str]
+) -> None:
+    """Apply a label change to many messages via batchModify, 1000 at a time."""
+    body_labels: dict[str, list[str]] = {}
+    if add_ids:
+        body_labels["addLabelIds"] = add_ids
+    if remove_ids:
+        body_labels["removeLabelIds"] = remove_ids
+    for i in range(0, len(ids), _BATCH):
+        chunk = ids[i : i + _BATCH]
+        service.users().messages().batchModify(
+            userId="me", body={"ids": chunk, **body_labels}
+        ).execute()
+
+
 def _do_modify_labels(args: dict) -> str:
     service = _service_for(args["account"])
     add = args.get("add") or []
@@ -449,17 +780,103 @@ def _do_modify_labels(args: dict) -> str:
     labels = service.users().labels().list(userId="me").execute().get("labels", [])
     add_ids = resolve_label_ids(add, labels)
     remove_ids = resolve_label_ids(remove, labels)
-    service.users().messages().modify(
-        userId="me",
-        id=args["message_id"],
-        body={"addLabelIds": add_ids, "removeLabelIds": remove_ids},
-    ).execute()
+    ids = _resolve_selection(service, args)
+    _batch_modify(service, ids, add_ids, remove_ids)
     parts = []
     if add_ids:
         parts.append(f"added {add_ids}")
     if remove_ids:
         parts.append(f"removed {remove_ids}")
-    return f"Updated labels on {args['message_id']}: {', '.join(parts)}."
+    return f"Updated labels on {len(ids)} message(s): {', '.join(parts)}."
+
+
+def _do_trash(args: dict) -> str:
+    service = _service_for(args["account"])
+    ids = _resolve_selection(service, args)
+    # Trash = add the TRASH system label (recoverable). Never batchDelete.
+    _batch_modify(service, ids, add_ids=["TRASH"], remove_ids=[])
+    return f"Moved {len(ids)} message(s) to Trash (recoverable for 30 days)."
+
+
+# Verb -> (system labels to add, system labels to remove). The friendly action
+# layer over batchModify: every Gmail "action" is really a system-label flip.
+_ACTION_LABELS: dict[str, tuple[list[str], list[str]]] = {
+    "archive": ([], ["INBOX"]),
+    "unarchive": (["INBOX"], []),
+    "mark_read": ([], ["UNREAD"]),
+    "mark_unread": (["UNREAD"], []),
+    "star": (["STARRED"], []),
+    "unstar": ([], ["STARRED"]),
+    "spam": (["SPAM"], ["INBOX"]),
+    "unspam": (["INBOX"], ["SPAM"]),
+    "trash": (["TRASH"], []),
+    "untrash": ([], ["TRASH"]),
+}
+
+
+def _do_bulk_action(args: dict) -> str:
+    action = args.get("action", "")
+    mapping = _ACTION_LABELS.get(action)
+    if mapping is None:
+        valid = ", ".join(sorted(_ACTION_LABELS))
+        raise ValueError(f"Unknown action {action!r}. Valid actions: {valid}.")
+    add_ids, remove_ids = mapping
+    service = _service_for(args["account"])
+    ids = _resolve_selection(service, args)
+    _batch_modify(service, ids, add_ids=add_ids, remove_ids=remove_ids)
+    return f"Applied '{action}' to {len(ids)} message(s) in {args['account']}."
+
+
+def _do_read_messages(args: dict) -> str:
+    service = _service_for(args["account"])
+    cap = args.get("max_results", 25)
+    ids: list[str] = list(args.get("message_ids") or [])
+    if not ids and args.get("query"):
+        ids = _search_ids(service, args["query"], cap)
+    if not ids:
+        raise ValueError(
+            "No selection given. Provide message_ids or a query to read."
+        )
+    ids = list(dict.fromkeys(ids))[:cap]
+    blocks = [f"Read {len(ids)} message(s) from {args['account']}:\n"]
+    for mid in ids:
+        resource = (
+            service.users()
+            .messages()
+            .get(userId="me", id=mid, format="full")
+            .execute()
+        )
+        blocks.append(format_parsed_message(parse_message(resource)))
+    return ("\n\n" + "-" * 60 + "\n\n").join(blocks)
+
+
+def _count_for(service: Any, query: str) -> int:
+    """Count messages matching a query by paging ids to exhaustion."""
+    return len(_all_message_ids(service, query))
+
+
+def _do_count_messages(args: dict) -> str:
+    query = args["query"]
+    if args.get("all_accounts"):
+        accounts = get_store().list_accounts()
+        if not accounts:
+            return "No accounts authorized yet. Run `gmail-mcp-auth add` to add one."
+        lines = [f"Count of '{query}' across {len(accounts)} account(s):"]
+        total = 0
+        for acct in accounts:
+            try:
+                n = _count_for(build_service(acct, get_store()), query)
+                total += n
+                lines.append(f"  {acct.email}: {n}")
+            except (GmailAuthError, HttpError) as e:
+                lines.append(f"  {acct.email}: error — {e}")
+        lines.append(f"  TOTAL: {total}")
+        return "\n".join(lines)
+    if not args.get("account"):
+        raise ValueError("Provide 'account', or set all_accounts=true.")
+    service = _service_for(args["account"])
+    n = _count_for(service, query)
+    return f"{n} message(s) match '{query}' in {args['account']}."
 
 
 def _do_search_all(args: dict) -> str:
@@ -480,6 +897,118 @@ def _do_search_all(args: dict) -> str:
             status = getattr(e.resp, "status", "?")
             blocks.append(f"{acct.email}: Gmail API error {status} — {e.reason}")
     return ("\n\n" + "=" * 60 + "\n\n").join(blocks)
+
+
+# ---------------------------------------------------------------------------
+# Filters (settings.basic scope)
+# ---------------------------------------------------------------------------
+#
+# A Gmail filter is a server-side rule Google applies to mail as it ARRIVES —
+# the durable complement to modify_labels (which only touches existing mail).
+# We expose label/archive/trash actions but deliberately NOT forwarding: the
+# settings.sharing scope needed to set a forwarding address is not requested,
+# so a filter created here can never exfiltrate mail to another address.
+
+def _label_names(label_ids: list[str], by_id: dict[str, str]) -> str:
+    """Render a list of label ids as readable names (falling back to the id)."""
+    return ", ".join(by_id.get(lid, lid) for lid in label_ids)
+
+
+def _do_list_filters(args: dict) -> str:
+    service = _service_for(args["account"])
+    resp = service.users().settings().filters().list(userId="me").execute()
+    filters = resp.get("filter", [])
+    if not filters:
+        return f"No filters in {args['account']}."
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    by_id = {lbl["id"]: lbl["name"] for lbl in labels}
+    lines = [f"{len(filters)} filter(s) in {args['account']}:"]
+    for flt in filters:
+        crit = flt.get("criteria", {})
+        act = flt.get("action", {})
+        crit_str = ", ".join(f"{k}={v}" for k, v in crit.items()) or "(any)"
+        act_parts: list[str] = []
+        if act.get("addLabelIds"):
+            act_parts.append(f"+[{_label_names(act['addLabelIds'], by_id)}]")
+        if act.get("removeLabelIds"):
+            act_parts.append(f"-[{_label_names(act['removeLabelIds'], by_id)}]")
+        if act.get("forward"):
+            act_parts.append(f"forward->{act['forward']}")
+        act_str = ", ".join(act_parts) or "(no action)"
+        lines.append(f"  [{flt.get('id')}] if ({crit_str}) then {act_str}")
+    return "\n".join(lines)
+
+
+def _do_create_filter(args: dict) -> str:
+    service = _service_for(args["account"])
+
+    criteria: dict[str, Any] = {}
+    if args.get("from_address"):
+        criteria["from"] = args["from_address"]
+    if args.get("to_address"):
+        criteria["to"] = args["to_address"]
+    if args.get("subject"):
+        criteria["subject"] = args["subject"]
+    if args.get("query"):
+        criteria["query"] = args["query"]
+    if args.get("has_attachment"):
+        criteria["hasAttachment"] = True
+    if not criteria:
+        return (
+            "Refusing to create a filter with no criteria — it would match ALL "
+            "mail. Provide at least one of from_address/to_address/subject/query/"
+            "has_attachment."
+        )
+
+    add = list(args.get("add_labels") or [])
+    remove = list(args.get("remove_labels") or [])
+    if args.get("delete"):
+        add.append("TRASH")
+    if args.get("star"):
+        add.append("STARRED")
+    if args.get("archive"):
+        remove.append("INBOX")
+    if args.get("mark_read"):
+        remove.append("UNREAD")
+    if not add and not remove:
+        return (
+            "Refusing to create a filter with no action. Set one of "
+            "archive/mark_read/delete/star, or add_labels/remove_labels."
+        )
+
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    # Resolve + de-dupe while preserving order (resolve_label_ids raises on
+    # an unknown name, listing the valid ones).
+    add_ids = list(dict.fromkeys(resolve_label_ids(add, labels))) if add else []
+    remove_ids = (
+        list(dict.fromkeys(resolve_label_ids(remove, labels))) if remove else []
+    )
+
+    action: dict[str, Any] = {}
+    if add_ids:
+        action["addLabelIds"] = add_ids
+    if remove_ids:
+        action["removeLabelIds"] = remove_ids
+
+    created = (
+        service.users()
+        .settings()
+        .filters()
+        .create(userId="me", body={"criteria": criteria, "action": action})
+        .execute()
+    )
+    return (
+        f"Created filter {created.get('id')} in {args['account']}: "
+        f"if {criteria} then {action}. Applies to mail arriving from now on."
+    )
+
+
+def _do_delete_filter(args: dict) -> str:
+    service = _service_for(args["account"])
+    service.users().settings().filters().delete(
+        userId="me", id=args["filter_id"]
+    ).execute()
+    return f"Deleted filter {args['filter_id']} from {args['account']}."
 
 
 # ---------------------------------------------------------------------------

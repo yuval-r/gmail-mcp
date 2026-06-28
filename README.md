@@ -1,8 +1,10 @@
 # gmail-mcp
 
+<!-- mcp-name: io.github.cunicopia-dev/multi-account-gmail-mcp -->
+
 ![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![tests: 63 passing](https://img.shields.io/badge/tests-63_passing-brightgreen)
+![tests: 74 passing](https://img.shields.io/badge/tests-74_passing-brightgreen)
 ![storage: SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 
@@ -82,9 +84,10 @@ one-command flow as the first.
 daemon, no keyring dependency, no cloud. Back it up by copying it; revoke an
 account by deleting a row; inspect it with any SQLite tool.
 
-**Least privilege.** Three granular scopes — `gmail.readonly`, `gmail.compose`,
-`gmail.modify` — never the full-mailbox `https://mail.google.com/`. It can read,
-draft, and label; it can't delete mail.
+**Least privilege.** Four granular scopes — `gmail.readonly`, `gmail.compose`,
+`gmail.modify`, `gmail.settings.basic` — never the full-mailbox
+`https://mail.google.com/`. It can read, draft, label, and manage filters; it
+never sends mail, and filters it creates can't forward mail off-account.
 
 **Headless-friendly.** The auth flow assumes the server may have no browser: it
 prints a consent URL, binds a fixed port, and you SSH-forward the redirect. Works
@@ -107,7 +110,14 @@ Every tool except `list_accounts` and `search_all_accounts` takes an `account`
 | `create_draft` | `account`, `to`, `subject`, `body`, `cc?`, `bcc?`, `html=false` | A draft (not sent). Returns the draft id. |
 | `list_drafts` | `account`, `max_results=20` | Draft ids in the account. |
 | `list_labels` | `account` | The account's labels (name + id). |
-| `modify_labels` | `account`, `message_id`, `add?`, `remove?` | Add/remove labels by id **or** name (resolves existing labels; won't create). |
+| `modify_labels` | `account`, selection (`message_id` \| `message_ids` \| `query`), `add?`, `remove?` | Add/remove labels on a **selection** (one id, a list, or everything a query matches), batched 1000/call. General mutator: archive = remove INBOX, mark-read = remove UNREAD, star = add STARRED. |
+| `trash` | `account`, selection (`message_id` \| `message_ids` \| `query`) | Move a selection to Trash (recoverable 30 days; not permanent delete). Refuses an empty selection. |
+| `bulk_action` | `account`, `action`, selection (`message_id` \| `message_ids` \| `query`) | Friendly verb layer over `modify_labels`. `action` ∈ `archive`/`unarchive`/`mark_read`/`mark_unread`/`star`/`unstar`/`spam`/`unspam`/`trash`/`untrash`. Batched 1000/call; refuses an empty selection. |
+| `read_messages` | `account`, `message_ids` \| `query`, `max_results=25` | Batch-read full content of many messages in one call (vs. N `read_message` calls). |
+| `count_messages` | `query`, `account?`, `all_accounts=false` | Count matches **without** fetching content — blast-radius check before a bulk action. `all_accounts` gives a per-account breakdown + total. |
+| `list_filters` | `account` | The account's filters: id, criteria, actions (label ids shown as names). |
+| `create_filter` | `account`, one of `from_address`/`to_address`/`subject`/`query`/`has_attachment`, plus an action (`archive`/`mark_read`/`delete`/`star` or `add_labels`/`remove_labels`) | A server-side rule applied to **incoming** mail. Can't forward off-account. |
+| `delete_filter` | `account`, `filter_id` | Remove a filter by id (leaves already-acted-on mail alone). |
 
 ---
 
@@ -169,7 +179,7 @@ it. `gmail-mcp` pins this to a fixed port (default `8765`, override with
 `GMAIL_MCP_OAUTH_PORT`) and runs with `open_browser=False` so it works on
 machines with no browser — see [The headless auth path](#the-headless-auth-path).
 
-**Scopes requested.** Three granular scopes — never the full-mailbox
+**Scopes requested.** Four granular scopes — never the full-mailbox
 `https://mail.google.com/`:
 
 | Scope | What it grants |
@@ -177,11 +187,18 @@ machines with no browser — see [The headless auth path](#the-headless-auth-pat
 | `gmail.readonly` | Read mail and metadata: search messages/threads, read bodies, list labels and drafts. Read-only — cannot modify anything. |
 | `gmail.compose` | Create, update, and manage drafts. Used only by `create_draft`. |
 | `gmail.modify` | Add/remove labels on messages. Used by `modify_labels`. |
+| `gmail.settings.basic` | List, create, and delete filters. Used by `list_filters`/`create_filter`/`delete_filter`. Does **not** grant forwarding-address changes (that's `gmail.settings.sharing`, not requested). |
 
 `gmail.send` is not requested. Without it the credential simply has no Gmail API
 path to send mail — the drafts-only behavior is a property of the grant, not just
-an omitted tool. The scope list lives in one place: `SCOPES` in
-`src/gmail_mcp/config.py`.
+an omitted tool. `gmail.settings.sharing` is likewise not requested, so no filter
+can forward mail to another address. The scope list lives in one place: `SCOPES`
+in `src/gmail_mcp/config.py`.
+
+> **Adding the filter scope to an existing install:** widening `SCOPES` does not
+> retro-grant already-authorized accounts. Each account must re-run
+> `gmail-mcp-auth add` to re-consent to the new scope; until it does, the filter
+> tools return a `403 insufficient scope` error.
 
 ### The multi-account model
 
@@ -358,7 +375,20 @@ secrets are hardcoded — `client_id`/`client_secret` come from your downloaded
 
 ## Install
 
-Requires Python 3.12+.
+Requires Python 3.12+. The PyPI distribution is **`multi-account-gmail-mcp`**
+(the bare `gmail-mcp` name is taken); it installs the `gmail-mcp` and
+`gmail-mcp-auth` commands.
+
+```bash
+# From PyPI
+pip install multi-account-gmail-mcp
+# or, to get the commands on PATH globally:
+uv tool install multi-account-gmail-mcp     # or: pipx install multi-account-gmail-mcp
+# or run without installing:
+uvx multi-account-gmail-mcp
+```
+
+From source (for development):
 
 ```bash
 git clone https://github.com/cunicopia-dev/gmail-mcp.git

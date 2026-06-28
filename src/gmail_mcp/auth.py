@@ -23,11 +23,49 @@ import argparse
 import errno
 import json
 import os
+import socket
+import subprocess
 import sys
 import time
 
 from gmail_mcp.config import SCOPES, client_secret_path
 from gmail_mcp.store import TokenStore
+
+
+def _port_is_free(port: int) -> bool:
+    """True if we can bind localhost:port right now (with address reuse)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _free_port(port: int) -> None:
+    """Best-effort: kill whatever is holding the OAuth loopback port.
+
+    A `gmail-mcp-auth add` attempt that never received its redirect (e.g. the
+    SSH tunnel wasn't up yet) leaves a wsgiref listener squatting on the fixed
+    port, so the next `add` dies with EADDRINUSE. The squatter is always our
+    own orphaned auth flow, so killing it is safe. Tries `fuser`, falls back to
+    `lsof`; both are best-effort and silently skipped if absent.
+    """
+    commands = (
+        ["fuser", "-k", f"{port}/tcp"],
+        ["sh", "-c", f"kill $(lsof -t -i:{port}) 2>/dev/null"],
+    )
+    for cmd in commands:
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=5, check=False)
+        except (FileNotFoundError, subprocess.SubprocessError):
+            continue
+        time.sleep(1)
+        if _port_is_free(port):
+            return
 
 
 def _add() -> int:
@@ -58,9 +96,10 @@ def _add() -> int:
         f"  2. After you approve, Google redirects to http://localhost:{port}/ .\n"
         f"     If you're SSH'd in, forward it: ssh -L {port}:localhost:{port} ...\n"
     )
-    # The fixed port can still be in TIME_WAIT from a previous `add` run, which
-    # makes the bind fail with EADDRINUSE. Retry a few times before giving up so
-    # back-to-back account adds don't bounce on the first attempt.
+    # The fixed port is often held by a prior `add` whose loopback listener is
+    # still squatting (an attempt that never got its redirect). That bind fails
+    # with EADDRINUSE. On collision we kill the squatter (always our own orphaned
+    # auth flow) and retry, so back-to-back account adds just work.
     creds = None
     for attempt in range(1, 6):
         try:
@@ -72,11 +111,12 @@ def _add() -> int:
             if exc.errno != errno.EADDRINUSE or attempt == 5:
                 raise
             print(
-                f"Port {port} busy (likely TIME_WAIT from a prior add); "
-                f"retrying in 2s ({attempt}/4)...",
+                f"Port {port} busy (orphaned listener from a prior add); "
+                f"clearing it and retrying ({attempt}/4)...",
                 file=sys.stderr,
             )
-            time.sleep(2)
+            _free_port(port)
+            time.sleep(1)
 
     if not creds.refresh_token:
         print(
