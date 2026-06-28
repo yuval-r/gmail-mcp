@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![tests: 48 passing](https://img.shields.io/badge/tests-48_passing-brightgreen)
+![tests: 63 passing](https://img.shields.io/badge/tests-63_passing-brightgreen)
 ![storage: SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-ready-FF6F00)
 
@@ -101,8 +101,8 @@ Every tool except `list_accounts` and `search_all_accounts` takes an `account`
 | --- | --- | --- |
 | `list_accounts` | — | Authorized accounts + last-used time. Discover valid `account` values. |
 | `search_messages` | `account`, `query`, `max_results=20` | Message summaries (Gmail search syntax) with ids. |
-| `read_message` | `account`, `message_id`, `format="full"` | Decoded headers, plaintext body (HTML stripped if needed), attachment metadata. |
-| `read_thread` | `account`, `thread_id` | Every message in the thread, in order. |
+| `read_message` | `account`, `message_id`, `format="full"`, `max_body_chars?` | Decoded headers, plaintext body (HTML stripped if needed), attachment metadata. Body capped by default; pass `max_body_chars=0` for the full body. |
+| `read_thread` | `account`, `thread_id`, `max_body_chars?` | Every message in the thread, in order. Each body capped by default; `max_body_chars=0` for full. |
 | `search_all_accounts` | `query`, `max_results_per_account=10` | One search across **every** account, each result tagged by account. |
 | `create_draft` | `account`, `to`, `subject`, `body`, `cc?`, `bcc?`, `html=false` | A draft (not sent). Returns the draft id. |
 | `list_drafts` | `account`, `max_results=20` | Draft ids in the account. |
@@ -337,7 +337,12 @@ low-stakes:
   wrapped in `⟦UNTRUSTED EMAIL CONTENT⟧` delimiters by a single helper
   (`wrap_untrusted` in `gmail.py`), with ids kept **outside** so tool-chaining
   still works. The read tools also note in their descriptions that content is
-  data, not instructions.
+  data, not instructions. Multi-message responses (search results, threads,
+  cross-account sweeps) emit the fence **once** around the whole content blob —
+  not once per message — and key each body to a trusted `#N` id manifest that
+  sits outside the fence. This both cuts delimiter token overhead and keeps real
+  ids exclusively in the trusted region, so an attacker can't smuggle a forged
+  id into a place the agent treats as authoritative.
 
 **Known limitation.** This only governs *this* server's surface. If the same
 agent session also has a tool that can reach the open internet (web fetch, HTTP),
@@ -401,6 +406,7 @@ All optional — sane defaults under `~/.gmail-mcp/`.
 | `GMAIL_MCP_DB` | `~/.gmail-mcp/tokens.db` | SQLite token store path. |
 | `GMAIL_MCP_CLIENT_SECRET` | `~/.gmail-mcp/client_secret.json` | Downloaded Google OAuth client. |
 | `GMAIL_MCP_OAUTH_PORT` | `8765` | Fixed loopback port for the auth flow (forward this over SSH on a headless box). |
+| `GMAIL_MCP_MAX_BODY_CHARS` | `20000` | Default per-message body cap for `read_message`/`read_thread`. `0` (or negative) means unlimited; a per-call `max_body_chars` argument overrides it. |
 
 ---
 

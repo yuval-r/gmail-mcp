@@ -104,6 +104,32 @@ class FakeMessages:
         return FakeExec({"id": kw["id"]})
 
 
+class FakeThreads:
+    def __init__(self, recorder):
+        self.r = recorder
+
+    def get(self, **kw):
+        self.r["thread_get"] = kw
+        return FakeExec({"messages": [
+            {
+                "id": "m1", "threadId": "t1",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [{"name": "Subject", "value": "First"}],
+                    "body": {"data": _b64url("x" * 200)},
+                },
+            },
+            {
+                "id": "m2", "threadId": "t1",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [{"name": "Subject", "value": "Second"}],
+                    "body": {"data": _b64url("reply body")},
+                },
+            },
+        ]})
+
+
 class FakeLabels:
     def list(self, **kw):
         return FakeExec({"labels": [
@@ -118,6 +144,9 @@ class FakeUsers:
 
     def messages(self):
         return FakeMessages(self.r)
+
+    def threads(self):
+        return FakeThreads(self.r)
 
     def labels(self):
         return FakeLabels()
@@ -155,6 +184,47 @@ def test_read_message_dispatch(fake_service):
     # Email content is wrapped in untrusted-data delimiters; the id is not.
     assert "UNTRUSTED EMAIL CONTENT" in out
     assert "Message m1" in out.split("UNTRUSTED EMAIL CONTENT")[0]
+
+
+def test_read_message_respects_max_body_chars(fake_service):
+    # "full body" is 9 chars; cap at 4 must truncate with a recoverable marker.
+    out = server._dispatch(
+        "read_message",
+        {"account": "a@example.com", "message_id": "m1", "max_body_chars": 4},
+    )
+    assert "truncated" in out
+    assert "max_body_chars=0" in out
+
+
+def test_read_message_max_body_zero_is_full(fake_service):
+    out = server._dispatch(
+        "read_message",
+        {"account": "a@example.com", "message_id": "m1", "max_body_chars": 0},
+    )
+    assert "full body" in out
+    assert "truncated" not in out
+
+
+def test_read_thread_single_wrapper(fake_service):
+    out = server._dispatch(
+        "read_thread",
+        {"account": "a@example.com", "thread_id": "t1", "max_body_chars": 0},
+    )
+    # One thread, two messages, exactly one untrusted fence.
+    assert out.count("⟦UNTRUSTED") == 1
+    assert "Thread t1" in out.split("UNTRUSTED EMAIL CONTENT")[0]
+    assert "[m1]" in out and "[m2]" in out
+    assert "reply body" in out
+
+
+def test_read_thread_default_cap_truncates(fake_service, monkeypatch):
+    # With a small server default and no per-call override, the 200-char body
+    # in the fake thread is truncated.
+    monkeypatch.setattr(server.config, "max_body_chars", lambda: 50)
+    out = server._dispatch(
+        "read_thread", {"account": "a@example.com", "thread_id": "t1"}
+    )
+    assert "truncated" in out
 
 
 def test_send_is_gone():

@@ -61,6 +61,28 @@ tests/        — pytest; Gmail client is mocked, no live network
   clean. Read-tool descriptions also carry `_UNTRUSTED_NOTICE` so the model is
   warned in-band. When adding a tool that surfaces message content, route it
   through the shared formatters / `wrap_untrusted`.
+- **One fence per response, not per message.** Aggregators
+  (`format_search_results`, `format_thread`) emit a single `wrap_untrusted`
+  pair around the whole content blob and precede it with a TRUSTED `#N [id]
+  (thread)` manifest; fenced bodies are keyed by the same `#N` ordinals. This
+  cuts repeated-delimiter token overhead AND keeps real ids exclusively outside
+  the fence (no genuine id inside for an attacker to mimic). Per-message
+  `format_message_summary` / `format_parsed_message` still fence once each. The
+  unwrapped inner content is built by `_summary_body` / `_parsed_body`; reuse
+  those when adding an aggregator so the single-fence invariant holds.
+- **Body length is capped.** `read_message` / `read_thread` truncate each body
+  to `config.max_body_chars()` (env `GMAIL_MCP_MAX_BODY_CHARS`, default 20000,
+  `<=0` = unlimited) via `gmail.truncate_body`, which appends a recoverable
+  `… [truncated N chars — re-fetch with max_body_chars=0 …]` marker. Both tools
+  accept a per-call `max_body_chars` arg (`_resolve_body_cap` resolves arg →
+  config → unlimited). Search results are unaffected — they use Gmail's short
+  `snippet`, not the full body.
+- **`strip_html` is the HTML→text fallback** (used only when a message has no
+  `text/plain` part). It strips comments (incl. Outlook `<!--[if mso]>` blocks
+  whose `>` chars defeat a bare tag regex), `<head>`, and `<script>/<style>`,
+  then decodes entities via the stdlib `html.unescape` (numeric + all named).
+  Entity decoding runs AFTER tag removal so a decoded `<` can't be re-parsed as
+  a tag — keep that ordering if you touch it.
 - **No audit log** — intentionally not implemented.
 
 ## Gotchas
