@@ -26,6 +26,7 @@ from gmail_mcp.gmail import (
     format_parsed_message,
     format_search_results,
     format_thread,
+    parse_headers,
     parse_message,
     resolve_label_ids,
 )
@@ -247,6 +248,27 @@ async def list_tools() -> list[Tool]:
                     "cc": {"type": "string"},
                     "bcc": {"type": "string"},
                     "html": {"type": "boolean", "default": False},
+                    "thread_id": {
+                        "type": "string",
+                        "description": (
+                            "Attach the draft to this thread as a reply. Gmail's "
+                            "threadId is set and In-Reply-To / References are "
+                            "derived from the thread's newest message, so the "
+                            "reply threads in clients that ignore threadId. "
+                            "Subject should match the thread (usually 'Re: ...'). "
+                            "Omit for a standalone draft."
+                        ),
+                    },
+                    "from_addr": {
+                        "type": "string",
+                        "description": (
+                            "From address for the draft, e.g. a shared alias like "
+                            "support@yourcompany.com. Must be a verified send-as "
+                            "alias on this account, otherwise Gmail rewrites it to "
+                            "the account address when the draft is sent. Defaults "
+                            "to the account address."
+                        ),
+                    },
                 },
                 "required": ["account", "to", "subject", "body"],
             },
@@ -655,21 +677,64 @@ def _do_read_thread(args: dict) -> str:
     return format_thread(args["thread_id"], messages, _resolve_body_cap(args))
 
 
+def _reply_headers(service: Any, thread_id: str) -> tuple[str | None, str | None]:
+    """Derive (In-Reply-To, References) from a thread's newest real message.
+
+    Gmail threads a draft on ``threadId`` alone, but many other clients key off
+    the RFC 5322 headers, so a draft without them can surface as a standalone
+    message once sent. Fetches headers only — no bodies — and skips messages
+    already in DRAFT state so a prior draft in the thread is never the reply
+    target. Returns ``(None, None)`` when no Message-ID is available, leaving
+    the draft threaded by ``threadId`` alone rather than failing the call.
+    """
+    thread = (
+        service.users()
+        .threads()
+        .get(
+            userId="me",
+            id=thread_id,
+            format="metadata",
+            metadataHeaders=["Message-ID", "References"],
+        )
+        .execute()
+    )
+    for msg in reversed(thread.get("messages", [])):
+        if "DRAFT" in msg.get("labelIds", []):
+            continue
+        headers = parse_headers(msg.get("payload", {}))
+        # parse_headers lowercases names, so this covers Message-Id / MESSAGE-ID.
+        message_id = headers.get("message-id")
+        if not message_id:
+            continue
+        references = f"{headers.get('references', '')} {message_id}".strip()
+        return message_id, references
+    return None, None
+
+
 def _do_create_draft(args: dict) -> str:
     service = _service_for(args["account"])
+    thread_id = args.get("thread_id")
+    in_reply_to, references = (
+        _reply_headers(service, thread_id) if thread_id else (None, None)
+    )
     raw = build_mime_message(
         to=args["to"],
         subject=args["subject"],
         body=args["body"],
-        sender=args["account"],
+        sender=args.get("from_addr") or args["account"],
         cc=args.get("cc"),
         bcc=args.get("bcc"),
         html=args.get("html", False),
+        in_reply_to=in_reply_to,
+        references=references,
     )
+    message: dict[str, Any] = {"raw": raw}
+    if thread_id:
+        message["threadId"] = thread_id
     draft = (
         service.users()
         .drafts()
-        .create(userId="me", body={"message": {"raw": raw}})
+        .create(userId="me", body={"message": message})
         .execute()
     )
     return f"Created draft {draft.get('id')}."

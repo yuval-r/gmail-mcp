@@ -6,6 +6,7 @@ mimics the chained-builder API (users().messages().list().execute()).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 
 import pytest
@@ -109,11 +110,28 @@ class FakeMessages:
 
 
 class FakeThreads:
+    # Overridable per-test so a case can drop Message-ID or add a DRAFT tail.
+    metadata_messages: list[dict] = [
+        {
+            "id": "m1", "threadId": "t1", "labelIds": ["INBOX"],
+            "payload": {"headers": [{"name": "Message-ID", "value": "<first@x.com>"}]},
+        },
+        {
+            "id": "m2", "threadId": "t1", "labelIds": ["INBOX"],
+            "payload": {"headers": [
+                {"name": "Message-Id", "value": "<second@x.com>"},
+                {"name": "References", "value": "<first@x.com>"},
+            ]},
+        },
+    ]
+
     def __init__(self, recorder):
         self.r = recorder
 
     def get(self, **kw):
         self.r["thread_get"] = kw
+        if kw.get("format") == "metadata":
+            return FakeExec({"messages": self.metadata_messages})
         return FakeExec({"messages": [
             {
                 "id": "m1", "threadId": "t1",
@@ -132,6 +150,15 @@ class FakeThreads:
                 },
             },
         ]})
+
+
+class FakeDrafts:
+    def __init__(self, recorder):
+        self.r = recorder
+
+    def create(self, **kw):
+        self.r["draft_create"] = kw
+        return FakeExec({"id": "draft_1"})
 
 
 class FakeLabels:
@@ -187,6 +214,9 @@ class FakeUsers:
 
     def labels(self):
         return FakeLabels()
+
+    def drafts(self):
+        return FakeDrafts(self.r)
 
     def settings(self):
         return FakeSettings(self.r)
@@ -418,3 +448,101 @@ def test_delete_filter_dispatch(fake_service):
 
 def test_unknown_tool():
     assert "Unknown tool" in server._dispatch("bogus", {})
+
+
+# --- create_draft: in-thread replies + send-as alias -------------------------
+
+BASE_DRAFT = {
+    "account": "a@example.com",
+    "to": "customer@example.com",
+    "subject": "Re: Help",
+    "body": "Answer.",
+}
+
+
+def _draft_message(fake_service) -> dict:
+    return fake_service.recorder["draft_create"]["body"]["message"]
+
+
+def _draft_mime(fake_service) -> str:
+    raw = _draft_message(fake_service)["raw"]
+    return base64.urlsafe_b64decode(raw).decode("utf-8")
+
+
+def test_create_draft_defaults_sender_to_account(fake_service):
+    out = server._dispatch("create_draft", dict(BASE_DRAFT))
+    assert "draft_1" in out
+    assert "From: a@example.com" in _draft_mime(fake_service)
+    # A standalone draft carries neither a threadId nor reply headers.
+    assert "threadId" not in _draft_message(fake_service)
+    assert "In-Reply-To:" not in _draft_mime(fake_service)
+
+
+def test_create_draft_from_addr_overrides_sender(fake_service):
+    server._dispatch("create_draft", {**BASE_DRAFT, "from_addr": "support@example.org"})
+    mime = _draft_mime(fake_service)
+    assert "From: support@example.org" in mime
+    assert "From: a@example.com" not in mime
+
+
+def test_create_draft_thread_id_sets_thread_and_reply_headers(fake_service):
+    server._dispatch("create_draft", {**BASE_DRAFT, "thread_id": "t1"})
+    assert _draft_message(fake_service)["threadId"] == "t1"
+    mime = _draft_mime(fake_service)
+    # The newest message in the thread is the one being replied to.
+    assert "In-Reply-To: <second@x.com>" in mime
+    # References accumulates the chain, oldest first.
+    assert "References: <first@x.com> <second@x.com>" in mime
+    # Headers come from a metadata fetch, not a full body download.
+    assert fake_service.recorder["thread_get"]["format"] == "metadata"
+
+
+def test_create_draft_thread_skips_draft_messages(fake_service, monkeypatch):
+    # A draft already sitting in the thread must not become the reply target.
+    monkeypatch.setattr(FakeThreads, "metadata_messages", [
+        {"id": "m1", "labelIds": ["INBOX"],
+         "payload": {"headers": [{"name": "Message-ID", "value": "<real@x.com>"}]}},
+        {"id": "m2", "labelIds": ["DRAFT"],
+         "payload": {"headers": [{"name": "Message-ID", "value": "<mydraft@x.com>"}]}},
+    ])
+    server._dispatch("create_draft", {**BASE_DRAFT, "thread_id": "t1"})
+    mime = _draft_mime(fake_service)
+    assert "In-Reply-To: <real@x.com>" in mime
+    assert "mydraft@x.com" not in mime
+
+
+def test_create_draft_thread_without_message_id_degrades_to_thread_only(
+    fake_service, monkeypatch
+):
+    monkeypatch.setattr(FakeThreads, "metadata_messages", [
+        {"id": "m1", "labelIds": ["INBOX"], "payload": {"headers": []}},
+    ])
+    server._dispatch("create_draft", {**BASE_DRAFT, "thread_id": "t1"})
+    # Threading still holds via threadId; the RFC headers are simply absent.
+    assert _draft_message(fake_service)["threadId"] == "t1"
+    assert "In-Reply-To:" not in _draft_mime(fake_service)
+
+
+def test_create_draft_references_seeds_from_message_id_when_absent(
+    fake_service, monkeypatch
+):
+    monkeypatch.setattr(FakeThreads, "metadata_messages", [
+        {"id": "m1", "labelIds": ["INBOX"],
+         "payload": {"headers": [{"name": "Message-ID", "value": "<only@x.com>"}]}},
+    ])
+    server._dispatch("create_draft", {**BASE_DRAFT, "thread_id": "t1"})
+    assert "References: <only@x.com>" in _draft_mime(fake_service)
+
+
+def test_create_draft_no_thread_id_skips_thread_fetch(fake_service):
+    server._dispatch("create_draft", dict(BASE_DRAFT))
+    assert "thread_get" not in fake_service.recorder
+
+
+def test_create_draft_schema_exposes_thread_id_and_from_addr():
+    tools = asyncio.run(server.list_tools())
+    schema = next(t.inputSchema for t in tools if t.name == "create_draft")
+    assert "thread_id" in schema["properties"]
+    assert "from_addr" in schema["properties"]
+    # Both are optional — a plain standalone draft must still work.
+    assert schema["required"] == ["account", "to", "subject", "body"]
