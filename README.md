@@ -364,27 +364,28 @@ low-stakes:
 
 - **Attachments land in one fixed place, and some never land at all.**
   `download_attachments` writes only under `~/.gmail-mcp/attachments/<message_id>/`
-  (`GMAIL_MCP_ATTACHMENT_DIR`). There is deliberately **no destination argument**:
-  one would be an arbitrary-file-write primitive that an instruction buried in an
-  email could aim at `~/.zshrc`. Filenames are attacker-chosen, so they are
-  reduced to inert ASCII basenames (path separators dropped, leading dots
-  stripped, bidi overrides removed, length capped, index-prefixed), and the
+  (`GMAIL_MCP_ATTACHMENT_DIR`). There is deliberately no destination argument,
+  because one would be an arbitrary-file-write primitive that an instruction
+  buried in an email could aim at `~/.zshrc`. Filenames are attacker-chosen, so
+  they are reduced to inert ASCII basenames (path separators dropped, leading
+  dots stripped, bidi overrides removed, length capped, index-prefixed), and the
   resolved path is re-checked against the root before the write. Files are
   written owner-only, with `O_NOFOLLOW` so a pre-planted symlink can't redirect
   them.
 
-  Before any bytes are fetched, each attachment is screened. Refused: every file
-  type [Gmail itself blocks in transit](https://support.google.com/mail/answer/6590)
+  Screening happens before any bytes are fetched. It refuses every file type
+  [Gmail itself blocks in transit](https://support.google.com/mail/answer/6590)
   (`.exe`, `.jar`, `.js`, `.vbs`, `.iso`, `.py`, ~50 more), macro-enabled Office
-  documents, executable MIME types, and **everything** on a message Gmail labeled
-  `SPAM`. Every dot-suffix is checked, not just the last, so `invoice.pdf.exe` is
-  caught. Archives are saved but flagged, since nothing here can look inside one.
+  documents, executable MIME types, and every attachment on a message Gmail
+  labeled `SPAM`. All of a filename's dot-suffixes are checked, not just the
+  last, so `invoice.pdf.exe` is caught. Archives are saved but flagged, since
+  nothing here can look inside one.
 
   **This is a type screen, not a virus scan.** Gmail scans attachments
   server-side but does not expose the verdict through its API. There is no
   malware field on the message or attachment resource, and `attachments.get`
   will serve bytes the Gmail web UI refuses to let you download. A clean verdict
-  here means "not an obvious weapon", never "scanned and safe". The saved file's
+  here means "not an obvious weapon," never "scanned and safe." The saved file's
   *contents* remain untrusted third-party data.
 
 **Known limitation.** This only governs *this* server's surface. If the same
