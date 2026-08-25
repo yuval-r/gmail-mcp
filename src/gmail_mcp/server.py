@@ -807,10 +807,9 @@ def _write_attachment(dest_dir: Path, filename: str, payload: bytes) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
     fd = os.open(path, flags, 0o600)
-    try:
-        os.write(fd, payload)
-    finally:
-        os.close(fd)
+    # fdopen, not a bare os.write: that can short-write a large payload.
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(payload)
     return path
 
 
