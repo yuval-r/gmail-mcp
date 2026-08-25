@@ -108,8 +108,8 @@ tests/        — pytest; Gmail client is mocked, no live network
   `SPAM`-labeled message. It checks *all* dot-suffixes, so `invoice.pdf.exe` is
   caught. Archives are allowed with a warning. Gmail does **not** expose its
   malware verdict through the API and `attachments.get` will serve bytes the
-  web UI blocks, so never describe this as a scan. Say so in any copy you write
-  about it.
+  web UI blocks, so never call this a scan in code comments, tool descriptions,
+  or docs.
 - **Attachments are addressed by `#N`, not by attachment id.** `_parsed_body`
   numbers them and deliberately omits the raw `attachmentId`; the download tool
   takes the same ordinal. Both sides get their ordering from one payload walk
