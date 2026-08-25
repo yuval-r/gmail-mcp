@@ -422,7 +422,7 @@ def sanitize_filename(filename: str, index: int) -> str:
         stem, dot, ext = base.rpartition(".")
         keep_ext = bool(dot) and len(ext) <= 10
         base = stem[: budget - len(ext) - 1] + "." + ext if keep_ext else base[:budget]
-    if not base.strip("._-"):
+    if not base:
         base = "attachment"
     return prefix + base
 
@@ -449,26 +449,24 @@ def screen_attachment(
         )
 
     extensions = _extensions(attachment.filename)
-    blocked = [e for e in extensions if e in _BLOCKED_EXTENSIONS]
+    blocked = next((e for e in extensions if e in _BLOCKED_EXTENSIONS), None)
     if blocked:
         return Screening(
             refused=(
-                f"blocked file type (.{blocked[0]}): Gmail refuses this type "
+                f"blocked file type (.{blocked}): Gmail refuses this type "
                 "in transit and it is not safe to write to disk"
             )
         )
-    macro = [e for e in extensions if e in _MACRO_EXTENSIONS]
+    macro = next((e for e in extensions if e in _MACRO_EXTENSIONS), None)
     if macro:
         return Screening(
-            refused=(
-                f"macro-enabled Office file (.{macro[0]}): can run VBA on open"
-            )
+            refused=f"macro-enabled Office file (.{macro}): can run VBA on open"
         )
     if attachment.mime_type.lower() in _BLOCKED_MIME_TYPES:
         return Screening(
             refused=f"executable content type ({attachment.mime_type})"
         )
-    if max_bytes is not None and max_bytes > 0 and attachment.size > max_bytes:
+    if max_bytes is not None and 0 < max_bytes < attachment.size:
         return Screening(
             refused=(
                 f"size {attachment.size} bytes exceeds the "
