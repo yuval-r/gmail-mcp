@@ -275,6 +275,16 @@ async def list_tools() -> list[Tool]:
                             "recipients in Cc."
                         ),
                     },
+                    "from_addr": {
+                        "type": "string",
+                        "description": (
+                            "From address for the draft, e.g. a shared alias like "
+                            "support@yourcompany.com. Must be a verified send-as "
+                            "alias on this account, otherwise Gmail rewrites it to "
+                            "the account address when the draft is sent. Defaults "
+                            "to the account address."
+                        ),
+                    },
                 },
                 "required": ["account", "body"],
             },
@@ -718,7 +728,7 @@ def _do_create_draft(args: dict) -> str:
         to=to,
         subject=subject,
         body=args["body"],
-        sender=args["account"],
+        sender=args.get("from_addr") or args["account"],
         cc=args.get("cc") or reply.get("cc"),
         bcc=args.get("bcc"),
         html=args.get("html", False),

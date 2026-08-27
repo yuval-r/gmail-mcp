@@ -6,6 +6,7 @@ mimics the chained-builder API (users().messages().list().execute()).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from email import message_from_bytes
 
@@ -204,11 +205,11 @@ class FakeUsers:
     def labels(self):
         return FakeLabels()
 
-    def settings(self):
-        return FakeSettings(self.r)
-
     def drafts(self):
         return FakeDrafts(self.r)
+
+    def settings(self):
+        return FakeSettings(self.r)
 
 
 class FakeService:
@@ -498,3 +499,39 @@ def test_create_draft_without_recipient_is_refused(fake_service):
     with pytest.raises(ValueError, match="needs 'to' and 'subject'"):
         server._dispatch("create_draft", {"account": "a@example.com", "body": "text"})
     assert "draft_create" not in fake_service.recorder
+
+
+# --- create_draft: send-as alias --------------------------------------------
+
+BASE_DRAFT = {
+    "account": "a@example.com",
+    "to": "customer@example.com",
+    "subject": "Re: Help",
+    "body": "Answer.",
+}
+
+
+def _draft_mime(fake_service) -> str:
+    raw = fake_service.recorder["draft_create"]["body"]["message"]["raw"]
+    return base64.urlsafe_b64decode(raw).decode("utf-8")
+
+
+def test_create_draft_defaults_sender_to_account(fake_service):
+    out = server._dispatch("create_draft", dict(BASE_DRAFT))
+    assert "d1" in out
+    assert "From: a@example.com" in _draft_mime(fake_service)
+
+
+def test_create_draft_from_addr_overrides_sender(fake_service):
+    server._dispatch("create_draft", {**BASE_DRAFT, "from_addr": "support@example.org"})
+    mime = _draft_mime(fake_service)
+    assert "From: support@example.org" in mime
+    assert "From: a@example.com" not in mime
+
+
+def test_create_draft_schema_exposes_from_addr():
+    tools = asyncio.run(server.list_tools())
+    schema = next(t.inputSchema for t in tools if t.name == "create_draft")
+    assert "from_addr" in schema["properties"]
+    # Optional either way; #2 made to/subject conditionally required instead.
+    assert schema["required"] == ["account", "body"]
