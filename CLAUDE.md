@@ -110,6 +110,57 @@ tests/        — pytest; Gmail client is mocked, no live network
   (sync) so this holds.
 - **Label resolution does not create labels.** `resolve_label_ids` matches
   existing ids/names (case-insensitive) and raises listing available names.
+- **The `mcp` pin is load-bearing.** `mcp>=1.0.0,<2`. Version 2.0 removed the
+  `Server.list_tools` / `Server.call_tool` decorators, so an unpinned resolve
+  picks 2.x and `server.py` raises `AttributeError` at import. The port is
+  tracked in #6; do not widen the pin without doing it.
+- **Header values are flattened, not validated.** Python's compat32 policy
+  *raises* `HeaderParseError` on an embedded header rather than injecting one,
+  and that raise misses the `ValueError` branch in `call_tool` and costs the
+  caller the whole draft. `_header_safe` collapses CR/LF so a hostile or merely
+  malformed reply Subject still drafts. Route every new header through it.
+
+## Releasing
+
+Tag-driven, no manual upload. `publish.yml` fires on `v*.*.*` and pushes to
+PyPI via Trusted Publishing (OIDC, no stored token).
+
+```bash
+# bump ALL FOUR, they drift independently:
+#   pyproject.toml, src/gmail_mcp/__init__.py, server.json (x2 version fields)
+git tag -a v0.5.0 -m "..." && git push origin v0.5.0
+```
+
+`server.json` is the MCP registry entry and has **two** version fields. It sat
+at 0.3.0 through the 0.4.0 release because only `pyproject.toml` got bumped.
+
+A merge is not a release. The mcp 2.0 breakage shipped to every fresh
+`uvx multi-account-gmail-mcp` for weeks; the fix only reached anyone once
+v0.4.1 existed on PyPI. Verify a release by installing it clean, not by
+trusting the green workflow:
+
+```bash
+uv venv /tmp/v && uv pip install --python /tmp/v/bin/python --refresh multi-account-gmail-mcp
+/tmp/v/bin/python -c "import gmail_mcp.server"
+```
+
+## Outside contributors
+
+This repo is public and takes PRs from strangers. Two things about that:
+
+- **Fork PRs need a workflow approval, and the UI hides this.** The default
+  `first_time_contributors` policy parks the run at `action_required`, and
+  `gh pr checks` reports *"no checks reported on the branch"* — not "pending",
+  not "blocked". PR #2 read as untested for a month because of it. Check
+  `gh run list --status action_required` whenever a PR shows no checks, then
+  `gh api -X POST repos/{owner}/{repo}/actions/runs/{id}/approve`. Read the
+  diff for `.github/` changes before approving.
+- **Merging two PRs that touch the same test fakes can conflict silently.**
+  #2 and #4 each added a `FakeDrafts` class and a `FakeUsers.drafts()` to
+  `tests/test_server.py`. Git merged them as duplicates with no conflict
+  marker, Python kept the later definition, and an assertion was quietly
+  testing the wrong fake. After resolving any test-file conflict:
+  `grep -c "class Fake" tests/test_server.py`.
 
 ## Running tests
 
