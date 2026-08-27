@@ -486,6 +486,28 @@ def build_reply_fields(
     return fields
 
 
+_HEADER_BREAK_RE = re.compile(r"[\r\n]+")
+
+
+def _header_safe(value: str) -> str:
+    """Flatten a header value onto one line.
+
+    Every header this server sets is attacker-reachable: ``to`` and ``subject``
+    are derived from the answered message when drafting a reply, and the rest
+    come from tool arguments an agent can be talked into by the very email it
+    is reading.
+
+    This is not injection defense — Python's compat32 policy already refuses an
+    embedded header, so a CR or LF here raises HeaderParseError inside
+    ``as_bytes()``. That is the problem: the raise escapes ``_do_create_draft``,
+    misses the ValueError branch in ``call_tool``, and returns the agent an
+    opaque "Unexpected error" instead of a draft. Flattening turns a hostile or
+    merely malformed Subject into a slightly ugly one and lets the reply
+    through.
+    """
+    return _HEADER_BREAK_RE.sub(" ", value).strip()
+
+
 def build_mime_message(
     to: str,
     subject: str,
@@ -509,18 +531,18 @@ def build_mime_message(
     else:
         msg = MIMEText(body, subtype, "utf-8")
 
-    msg["To"] = to
-    msg["Subject"] = subject
+    msg["To"] = _header_safe(to)
+    msg["Subject"] = _header_safe(subject)
     if sender:
-        msg["From"] = sender
+        msg["From"] = _header_safe(sender)
     if cc:
-        msg["Cc"] = cc
+        msg["Cc"] = _header_safe(cc)
     if bcc:
-        msg["Bcc"] = bcc
+        msg["Bcc"] = _header_safe(bcc)
     if in_reply_to:
-        msg["In-Reply-To"] = in_reply_to
+        msg["In-Reply-To"] = _header_safe(in_reply_to)
     if references:
-        msg["References"] = references
+        msg["References"] = _header_safe(references)
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
     return raw

@@ -474,3 +474,56 @@ def test_build_reply_fields_without_message_id_omits_threading_headers():
     assert "in_reply_to" not in fields
     assert "references" not in fields
     assert fields["subject"] == "Re: Terminanfrage"
+
+
+# --- header flattening ------------------------------------------------------
+#
+# compat32 refuses an embedded header outright, so none of these ever injected
+# anything; unflattened they raised HeaderParseError out of build_mime_message
+# and cost the caller the whole draft. These assert the reply still goes out.
+
+def _headers_of(raw: str):
+    return message_from_bytes(base64.urlsafe_b64decode(raw))
+
+
+def test_build_mime_flattens_subject_with_embedded_header():
+    # A reply's subject comes from the answered message, so it is chosen by
+    # whoever sent the mail.
+    raw = build_mime_message(
+        to="b@c.com",
+        subject="Invoice\r\nBcc: attacker@evil.com",
+        body="text",
+    )
+    msg = _headers_of(raw)
+    assert msg["Bcc"] is None
+    assert msg["Subject"] == "Invoice Bcc: attacker@evil.com"
+
+
+def test_build_mime_flattens_recipient_with_embedded_header():
+    raw = build_mime_message(
+        to="b@c.com\nCc: attacker@evil.com", subject="Hi", body="text"
+    )
+    msg = _headers_of(raw)
+    assert msg["Cc"] is None
+    assert "\n" not in msg["To"]
+
+
+def test_build_mime_blank_line_in_subject_leaves_body_intact():
+    raw = build_mime_message(
+        to="b@c.com", subject="Hi\r\n\r\nnot the body", body="real body"
+    )
+    msg = _headers_of(raw)
+    assert msg.get_payload(decode=True) == b"real body"
+
+
+def test_build_mime_threading_headers_are_flattened():
+    raw = build_mime_message(
+        to="b@c.com",
+        subject="Hi",
+        body="text",
+        in_reply_to="<a@mail>\r\nX-Evil: 1",
+        references="<a@mail>\r\nX-Evil: 1",
+    )
+    msg = _headers_of(raw)
+    assert msg["X-Evil"] is None
+    assert msg["In-Reply-To"] == "<a@mail> X-Evil: 1"
