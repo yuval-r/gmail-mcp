@@ -372,6 +372,19 @@ _BLOCKED_MIME_TYPES = frozenset(
     }
 )
 
+# Blocked extensions that are also ordinary words in a filename. Screened in
+# the final position, where they decide what the file is, and skipped in the
+# interior, where they do not.
+#
+# `.com` is the whole list, and it is here because a filename built from a
+# domain is common — `www.example.com.pdf`, `mail.google.com.png`, an invoice
+# named after the vendor. Screening every suffix meant refusing all of them.
+#
+# Position is what makes this safe. `invoice.pdf.com` still ends in `.com` and
+# is still refused. `www.example.com.pdf` ends in `.pdf`, so the OS opens it in
+# a PDF reader and the interior `com` is text, not an extension.
+_AMBIGUOUS_INTERIOR_EXTENSIONS = frozenset({"com"})
+
 # Containers whose contents nothing here can inspect. Allowed, but flagged.
 _ARCHIVE_EXTENSIONS = frozenset({
     "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "z", "lz", "lzma"
@@ -391,13 +404,19 @@ class Screening:
 
 
 def _extensions(filename: str) -> list[str]:
-    """Every dot-separated suffix of a filename, lowercased.
+    """Every dot-separated suffix of a filename, lowercased and stripped.
 
     All of them, not just the last: ``invoice.pdf.exe`` is the classic
     double-extension trick, and ``report.exe.pdf`` is the same trick run
     backwards for a viewer that renders right-to-left.
+
+    Suffixes are stripped because whitespace is not part of an extension and
+    padding one is enough to walk past a set lookup: ``"virus.exe "`` yields
+    the suffix ``"exe "``, which is not ``"exe"``, and the whole screen opens.
+    Windows ignores a trailing space when resolving the name, so the file it
+    refused to see is the file that would have run.
     """
-    return [part.lower() for part in filename.split(".")[1:] if part]
+    return [part.strip().lower() for part in filename.split(".")[1:] if part.strip()]
 
 
 def sanitize_filename(filename: str, index: int) -> str:
@@ -449,7 +468,14 @@ def screen_attachment(
         )
 
     extensions = _extensions(attachment.filename)
-    blocked = next((e for e in extensions if e in _BLOCKED_EXTENSIONS), None)
+    # The final suffix decides what the file is, so it is always screened.
+    # Interior suffixes are screened too — that is what catches
+    # `invoice.pdf.exe` — except for the handful that double as ordinary
+    # filename words. See _AMBIGUOUS_INTERIOR_EXTENSIONS.
+    screened = extensions[-1:] + [
+        e for e in extensions[:-1] if e not in _AMBIGUOUS_INTERIOR_EXTENSIONS
+    ]
+    blocked = next((e for e in screened if e in _BLOCKED_EXTENSIONS), None)
     if blocked:
         return Screening(
             refused=(
@@ -457,7 +483,7 @@ def screen_attachment(
                 "in transit and it is not safe to write to disk"
             )
         )
-    macro = next((e for e in extensions if e in _MACRO_EXTENSIONS), None)
+    macro = next((e for e in screened if e in _MACRO_EXTENSIONS), None)
     if macro:
         return Screening(
             refused=f"macro-enabled Office file (.{macro}): can run VBA on open"

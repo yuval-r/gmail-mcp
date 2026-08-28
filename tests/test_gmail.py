@@ -696,6 +696,36 @@ def test_screen_refuses_oversized_attachment():
     assert "size" in verdict.refused.lower() or "large" in verdict.refused.lower()
 
 
+def test_screen_ignores_trailing_space_on_an_extension():
+    # "exe " is not "exe", so a padded name walked straight past the set
+    # lookup. Windows resolves the name without the space.
+    for name in ("virus.exe ", "setup.msi ", "payload.exe\t"):
+        assert screen_attachment(_att(name), []).refused is not None, name
+
+
+def test_screen_allows_a_document_named_after_a_domain():
+    # `.com` is a blocked extension and the commonest TLD. Screening every
+    # suffix meant refusing saved web pages and vendor-named invoices.
+    for name in ("www.example.com.pdf", "mail.google.com.png", "acme.com.docx"):
+        verdict = screen_attachment(_att(name), [])
+        assert verdict.refused is None, f"{name}: {verdict.refused}"
+
+
+def test_screen_still_refuses_com_in_the_final_position():
+    # The exemption is positional, not a hole: a file that actually ends in
+    # .com is a DOS executable and still dies.
+    verdict = screen_attachment(_att("invoice.pdf.com"), [])
+    assert verdict.refused is not None
+    assert ".com" in verdict.refused
+
+
+def test_screen_ambiguity_exemption_does_not_extend_to_real_executables():
+    # Only genuinely ambiguous suffixes are skipped in the interior. An
+    # interior .exe is still the double-extension trick.
+    assert screen_attachment(_att("invoice.com.exe"), []).refused is not None
+    assert screen_attachment(_att("report.exe.pdf"), []).refused is not None
+
+
 # --- attachment numbering in output -----------------------------------------
 
 def test_parsed_message_numbers_attachments_and_hides_raw_id():
