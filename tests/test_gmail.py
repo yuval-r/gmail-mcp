@@ -17,6 +17,7 @@ from gmail_mcp.gmail import (
     format_parsed_message,
     format_search_results,
     format_thread,
+    gmail_client,
     parse_headers,
     parse_message,
     resolve_label_ids,
@@ -651,3 +652,20 @@ def test_parse_message_captures_label_ids():
     resource = {"id": "m1", "threadId": "t1", "labelIds": ["INBOX", "SPAM"],
                 "payload": {}}
     assert parse_message(resource).label_ids == ["INBOX", "SPAM"]
+
+
+# --- client construction ----------------------------------------------------
+
+def test_gmail_client_does_not_touch_discovery_files(monkeypatch):
+    # A uvx cache prune can delete the installed package under a running
+    # server. The discovery doc is read once at import, so a later client
+    # build must not import discovery_cache or open its JSON again.
+    import googleapiclient.discovery as discovery
+    from google.oauth2.credentials import Credentials
+
+    def boom(*a, **kw):
+        raise AssertionError("discovery doc re-read after startup")
+
+    monkeypatch.setattr(discovery, "_retrieve_discovery_doc", boom)
+    svc = gmail_client(Credentials(token="t"))
+    assert hasattr(svc.users().messages(), "list")

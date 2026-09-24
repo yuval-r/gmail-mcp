@@ -24,7 +24,8 @@ from typing import Any
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from googleapiclient import discovery_cache
+from googleapiclient.discovery import build_from_document
 
 from gmail_mcp.config import SCOPES, client_secret_path
 from gmail_mcp.store import Account, TokenStore
@@ -77,6 +78,18 @@ def credentials_for(account: Account) -> Credentials:
     )
 
 
+# The Gmail discovery doc ships inside google-api-python-client. build() imports
+# discovery_cache and reads that JSON from disk on EVERY call, so when a uvx
+# cache prune deletes the install under a running server, every later tool
+# call fails. Read it once at startup and build clients from memory instead.
+_GMAIL_DISCOVERY_DOC = json.loads(discovery_cache.get_static_doc("gmail", "v1"))
+
+
+def gmail_client(creds: Credentials) -> Any:
+    """Build a Gmail API client from the in-memory discovery doc."""
+    return build_from_document(_GMAIL_DISCOVERY_DOC, credentials=creds)
+
+
 def build_service(account: Account, store: TokenStore) -> Any:
     """Build an authenticated Gmail API client for ``account``.
 
@@ -94,7 +107,7 @@ def build_service(account: Account, store: TokenStore) -> Any:
             "Re-run `gmail-mcp-auth add` to re-authorize this account."
         ) from e
     store.touch(account.email)
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return gmail_client(creds)
 
 
 def _persist_creds(email: str, creds: Credentials, store: TokenStore) -> None:
