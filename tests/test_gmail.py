@@ -323,6 +323,58 @@ def test_format_thread_empty():
     assert format_thread("t9", []) == "Thread t9 has no messages."
 
 
+# --- status labels ----------------------------------------------------------
+#
+# Drafts carry real From/To/Subject/Date headers, so without a label they read
+# exactly like sent mail. Gmail assigns these system labels (a sender cannot),
+# so they belong in the trusted part of the output, never inside the fence.
+
+def test_search_results_mark_drafts_outside_fence():
+    results = [
+        {"id": "m1", "threadId": "t1", "subject": "FOIA request",
+         "labelIds": ["DRAFT"]},
+        {"id": "m2", "threadId": "t1", "subject": "Re: FOIA request",
+         "labelIds": ["SENT"]},
+    ]
+    out = format_search_results("a@b.com", results)
+    pre, _, after = out.partition(_OPEN)
+    fenced, _, _ = after.partition(_CLOSE)
+    assert "#1 [m1] (thread t1) [DRAFT]" in pre
+    assert "#2 [m2] (thread t1) [SENT]" in pre
+    assert "DRAFT" not in fenced
+
+
+def test_status_labels_keep_system_labels_only_in_fixed_order():
+    results = [{"id": "m1", "threadId": "t1",
+                "labelIds": ["Label_5", "INBOX", "CATEGORY_UPDATES", "UNREAD", "SENT"]}]
+    out = format_search_results("a@b.com", results)
+    assert "#1 [m1] (thread t1) [SENT, INBOX, UNREAD]\n" in out
+    assert "Label_5" not in out
+    assert "CATEGORY" not in out
+
+
+def test_search_results_without_labels_have_no_tag():
+    out = format_search_results("a@b.com", [{"id": "m1", "threadId": "t1"}])
+    assert "#1 [m1] (thread t1)\n" in out
+
+
+def test_format_parsed_message_marks_draft():
+    msg = ParsedMessage(id="m1", thread_id="t1", body="x", label_ids=["DRAFT"])
+    out = format_parsed_message(msg)
+    assert out.startswith("Message m1 (thread t1) [DRAFT]\n")
+
+
+def test_format_thread_manifest_marks_draft():
+    msgs = [
+        ParsedMessage(id="m1", thread_id="t1", body="sent one", label_ids=["SENT"]),
+        ParsedMessage(id="m2", thread_id="t1", body="unsent", label_ids=["DRAFT"]),
+    ]
+    out = format_thread("t1", msgs)
+    pre, _, _ = out.partition(_OPEN)
+    assert "#1 [m1] (thread t1) [SENT]" in pre
+    assert "#2 [m2] (thread t1) [DRAFT]" in pre
+
+
 # --- body truncation --------------------------------------------------------
 
 def test_truncate_body_under_limit_unchanged():

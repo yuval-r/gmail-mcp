@@ -282,6 +282,22 @@ def test_search_messages_dispatch(fake_service):
     assert fake_service.recorder["list"]["q"] == "is:unread"
 
 
+def test_search_messages_shows_draft_label(fake_service, monkeypatch):
+    # labelIds comes back on a metadata fetch; the summary must carry it.
+    orig = FakeMessages.get
+
+    def get(self, **kw):
+        resp = orig(self, **kw)
+        if kw.get("format") == "metadata" and kw["id"] == "m1":
+            resp._result["labelIds"] = ["DRAFT"]
+        return resp
+
+    monkeypatch.setattr(FakeMessages, "get", get)
+    out = server._dispatch("search_messages", {"account": "a@example.com", "query": "x"})
+    assert "[m1] (thread t1) [DRAFT]" in out
+    assert "[m2] (thread t1)\n" in out
+
+
 def test_read_message_dispatch(fake_service):
     out = server._dispatch("read_message", {"account": "a@example.com", "message_id": "m1"})
     assert "full body" in out

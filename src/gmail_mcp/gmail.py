@@ -509,6 +509,20 @@ _UNTRUSTED_CLOSE = "⟦END UNTRUSTED EMAIL CONTENT⟧"
 _BLOCK_SEP = "\n\n" + "-" * 40 + "\n\n"
 
 
+# System labels worth showing next to an id, in display order. Gmail assigns
+# these, so they are trusted and sit outside the fence. DRAFT is the one that
+# matters most: a draft has real From/To/Subject/Date headers and otherwise
+# reads exactly like mail that was sent. User labels (Label_N) and CATEGORY_*
+# are left out; they are noise here and list_labels resolves them.
+_STATUS_LABELS = ("DRAFT", "SENT", "INBOX", "UNREAD", "SPAM", "TRASH")
+
+
+def status_tag(label_ids: list[str] | None) -> str:
+    """Render a message's system labels as a trailing ` [DRAFT, ...]` tag."""
+    present = [lbl for lbl in _STATUS_LABELS if lbl in (label_ids or ())]
+    return f" [{', '.join(present)}]" if present else ""
+
+
 def wrap_untrusted(content: str) -> str:
     """Wrap attacker-controlled email content in untrusted-data delimiters."""
     return f"{_UNTRUSTED_OPEN}\n{content}\n{_UNTRUSTED_CLOSE}"
@@ -530,7 +544,7 @@ def truncate_body(text: str, limit: int | None) -> str:
     )
 
 
-def _summary_body(msg: dict[str, str]) -> str:
+def _summary_body(msg: dict[str, Any]) -> str:
     """Untrusted portion of one search summary (headers + snippet, no id)."""
     return (
         f"  From: {msg.get('from', '')}\n"
@@ -564,15 +578,16 @@ def _parsed_body(msg: ParsedMessage, max_body_chars: int | None = None) -> str:
     return "\n".join(lines)
 
 
-def format_message_summary(msg: dict[str, str]) -> str:
+def format_message_summary(msg: dict[str, Any]) -> str:
     """Format a single search-result summary block (id outside, content fenced)."""
     return (
-        f"[{msg.get('id', '')}] (thread {msg.get('threadId', '')})\n"
+        f"[{msg.get('id', '')}] (thread {msg.get('threadId', '')})"
+        f"{status_tag(msg.get('labelIds'))}\n"
         f"{wrap_untrusted(_summary_body(msg))}"
     )
 
 
-def format_search_results(account: str, results: list[dict[str, str]]) -> str:
+def format_search_results(account: str, results: list[dict[str, Any]]) -> str:
     """Format a list of message summaries for one account, fenced once.
 
     A trusted id manifest precedes a single untrusted wrapper; fenced bodies
@@ -582,6 +597,7 @@ def format_search_results(account: str, results: list[dict[str, str]]) -> str:
         return f"No messages found in {account}."
     manifest = [
         f"  #{i} [{m.get('id', '')}] (thread {m.get('threadId', '')})"
+        f"{status_tag(m.get('labelIds'))}"
         for i, m in enumerate(results, 1)
     ]
     inner = "\n\n".join(
@@ -600,7 +616,7 @@ def format_parsed_message(
     message content (headers, attachment filenames, body) is fenced once.
     """
     return (
-        f"Message {msg.id} (thread {msg.thread_id})\n"
+        f"Message {msg.id} (thread {msg.thread_id}){status_tag(msg.label_ids)}\n"
         f"{wrap_untrusted(_parsed_body(msg, max_body_chars))}"
     )
 
@@ -614,7 +630,7 @@ def format_thread(
     if not messages:
         return f"Thread {thread_id} has no messages."
     manifest = [
-        f"  #{i} [{m.id}] (thread {m.thread_id})"
+        f"  #{i} [{m.id}] (thread {m.thread_id}){status_tag(m.label_ids)}"
         for i, m in enumerate(messages, 1)
     ]
     inner = _BLOCK_SEP.join(
