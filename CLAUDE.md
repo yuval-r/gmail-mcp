@@ -40,8 +40,9 @@ tests/        — pytest; Gmail client is mocked, no live network
   Never hardcode `client_id`/`client_secret`.
 - **Token store**: SQLite at `~/.gmail-mcp/tokens.db` (env `GMAIL_MCP_DB`).
   Keyed by email. Holds refresh_token + last access-token blob + scopes, so
-  `TokenStore` makes the DB `0o600` and a new parent dir `0o700` (it logs,
-  not fails, when it cannot chmod a DB it does not own).
+  `TokenStore` makes the DB `0o600` and a new parent dir `0o700`. If it
+  cannot chmod a DB it does not own, it accepts one that is already private
+  and refuses one that others can read.
 - **Refresh**: google-auth's `Request` transport refreshes the access token
   on demand; `build_service` persists the refreshed blob back to the DB.
 - **Scopes** (one constant, `config.SCOPES`): `gmail.readonly`,

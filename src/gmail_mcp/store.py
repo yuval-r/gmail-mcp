@@ -58,8 +58,16 @@ class TokenStore:
         try:
             os.chmod(self.path, 0o600)
         except PermissionError:
-            # Not our file to change; still usable if it is readable.
-            logger.warning("Could not make %s owner-only", self.path)
+            # Not our file to change. Fine if it is already private; refuse
+            # to run on refresh tokens that others can read.
+            mode = self.path.stat().st_mode & 0o777
+            if mode & 0o077:
+                raise RuntimeError(
+                    f"Token DB {self.path} is mode {oct(mode)} and not owned "
+                    "by this user, so it cannot be made owner-only. Fix its "
+                    "owner or mode, or point GMAIL_MCP_DB elsewhere."
+                ) from None
+            logger.warning("Could not chmod %s; it is already private", self.path)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)

@@ -1153,9 +1153,11 @@ def test_download_all_refused_runs_no_scanner(fake_service, downloads, monkeypat
     assert "Refused 1" in out
 
 
-def test_write_failure_cleanup_stays_inside_root(fake_service, downloads, monkeypatch, tmp_path):
-    # A symlinked quarantine dir makes the write refuse; the cleanup must not
-    # then delete a same-named file outside the root.
+def test_symlinked_quarantine_dir_is_refused_before_any_write(
+    fake_service, downloads, monkeypatch, tmp_path
+):
+    # A symlinked quarantine/<message_id> is refused before anything is made
+    # or removed through it.
     outside = tmp_path / "outside"
     outside.mkdir()
     victim = outside / "01-invoice.pdf"
@@ -1163,9 +1165,28 @@ def test_write_failure_cleanup_stays_inside_root(fake_service, downloads, monkey
     (downloads / "quarantine").mkdir(parents=True)
     (downloads / "quarantine" / MID).symlink_to(outside)
     _one_pdf(monkeypatch)
-    out = _download()
+    with pytest.raises(ValueError, match="outside the attachment root"):
+        _download()
     assert victim.read_bytes() == b"keep me"
-    assert "Refused 1" in out
+    assert [p.name for p in outside.iterdir()] == ["01-invoice.pdf"]
+
+
+def test_download_survives_parallel_cleanup_race(fake_service, downloads, monkeypatch):
+    # Another call can rmdir quarantine/<message_id> between our mkdir and
+    # mkdtemp; one retry recreates it.
+    real_mkdtemp = server.tempfile.mkdtemp
+    calls = []
+
+    def flaky(**kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_mkdtemp(**kw)
+
+    monkeypatch.setattr(server.tempfile, "mkdtemp", flaky)
+    _one_pdf(monkeypatch)
+    out = _download()
+    assert "Saved 1" in out
 
 
 def test_download_write_failure_is_refused_not_raised(fake_service, downloads, monkeypatch):

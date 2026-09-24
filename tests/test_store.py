@@ -34,15 +34,32 @@ def test_existing_db_is_tightened(tmp_path):
     assert db.stat().st_mode & 0o777 == 0o600
 
 
-def test_not_owned_db_does_not_break_the_store(tmp_path, monkeypatch):
-    # chmod fails on a file someone else owns; the store must still open.
+def _deny_chmod(monkeypatch):
     import gmail_mcp.store as store_mod
 
     def deny(path, mode):
         raise PermissionError(1, "Operation not permitted")
 
     monkeypatch.setattr(store_mod.os, "chmod", deny)
-    TokenStore(path=tmp_path / "tokens.db").list_accounts()
+
+
+def test_not_owned_but_private_db_still_opens(tmp_path, monkeypatch):
+    # chmod fails on a file someone else owns; if it is already private, fine.
+    db = tmp_path / "tokens.db"
+    TokenStore(path=db)
+    db.chmod(0o600)
+    _deny_chmod(monkeypatch)
+    TokenStore(path=db).list_accounts()
+
+
+def test_not_owned_readable_db_is_refused(tmp_path, monkeypatch):
+    # Refresh tokens readable by others, and no way to fix it: refuse.
+    db = tmp_path / "tokens.db"
+    TokenStore(path=db)
+    db.chmod(0o644)
+    _deny_chmod(monkeypatch)
+    with pytest.raises(RuntimeError, match="0o644"):
+        TokenStore(path=db)
 
 
 def test_empty_list(store):

@@ -1011,8 +1011,16 @@ def _do_download_attachments(args: dict) -> str:
     # call (even from another server process) can never rewrite a file that
     # this call is scanning.
     message_quarantine = config.quarantine_dir() / message_id
-    message_quarantine.mkdir(mode=0o700, parents=True, exist_ok=True)
-    held_dir = Path(tempfile.mkdtemp(prefix="dl-", dir=message_quarantine))
+    _inside_root(message_quarantine)  # before anything is made through it
+    for attempt in range(2):
+        message_quarantine.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            held_dir = Path(tempfile.mkdtemp(prefix="dl-", dir=message_quarantine))
+            break
+        except FileNotFoundError:
+            # Another call removed the empty message dir in between; once more.
+            if attempt:
+                raise
     max_bytes = config.max_attachment_bytes()
 
     # (ordinal, path in quarantine, "(type, size) [warning]")
