@@ -934,8 +934,9 @@ def _scan_files(paths: list[Path]) -> list[tuple[str, str]]:
     except OSError as e:
         # Reported once: the error is about the scanner, not any one file.
         return [("broken", str(e))] + [("broken", "")] * (len(paths) - 1)
-    lines = (proc.stdout + proc.stderr).splitlines()
-    tail = (proc.stdout + proc.stderr).strip()[-_SCAN_OUTPUT_CHARS:]
+    output = proc.stdout + proc.stderr
+    lines = output.splitlines()
+    tail = output.strip()[-_SCAN_OUTPUT_CHARS:]
     verdicts: list[tuple[str, str]] = []
     for path in paths:
         line = next((ln for ln in lines if ln.startswith(f"{path}: ")), None)
@@ -1045,9 +1046,14 @@ def _do_download_attachments(args: dict) -> str:
             (ordinal, path, f"({att.mime_type}, {len(payload)} bytes){note}")
         )
 
+    clean: list[tuple[int, Path, str]] = []
+    held: list[tuple[tuple[int, Path, str], str, str]] = []
     verdicts = _scan_files([path for _, path, _ in written])
-    clean = [w for w, (v, _) in zip(written, verdicts, strict=True) if v == "clean"]
-    held = [(w, v, d) for w, (v, d) in zip(written, verdicts, strict=True) if v != "clean"]
+    for w, (scan, detail) in zip(written, verdicts, strict=True):
+        if scan == "clean":
+            clean.append(w)
+        else:
+            held.append((w, scan, detail))
 
     released: list[str] = []
     if clean:

@@ -390,9 +390,10 @@ low-stakes:
   download. So files that pass the screen are written to
   `~/.gmail-mcp/attachments/quarantine/<message_id>/` and handed to a local
   scanner: ClamAV's `clamscan` when it is installed, or whatever
-  `GMAIL_MCP_SCAN_CMD` names. Only a clean result (exit 0) moves them to
-  `~/.gmail-mcp/attachments/<message_id>/`. A threat (exit 1), a scanner error,
-  or no scanner at all leaves them in quarantine and says so. A clean scan
+  `GMAIL_MCP_SCAN_CMD` names, in one run per download. Each file's verdict
+  comes from its own result line, and only a file that scans clean moves to
+  `~/.gmail-mcp/attachments/<message_id>/`. A threat, a scanner error, or no
+  scanner at all leaves it in quarantine and says so. A clean scan
   lowers the risk; it does not prove a file safe. The saved file's *contents*
   remain untrusted third-party data.
 

@@ -339,13 +339,13 @@ def resolve_label_ids(
 #    blocks in transit, plus macro-enabled Office documents.
 #
 # What this is NOT: an antivirus scan. The server runs a local scanner over the
-# files that pass this screen (see _scan in server.py); this module only types
-# them. Gmail scans attachments server-side but does not expose the verdict
-# through the API. There is no malware field on the message or attachment
-# resource, and ``attachments.get`` will happily serve bytes the Gmail web UI
-# refuses to download. The only Gmail verdict
-# visible here is the SPAM label on the parent message, which is why a spam
-# message's attachments are refused wholesale. Everything else below is a
+# files that pass this screen (see _scan_files in server.py); this module only
+# types them. Gmail scans attachments server-side but does not expose the
+# verdict through the API. There is no malware field on the message or
+# attachment resource, and ``attachments.get`` will happily serve bytes the
+# Gmail web UI refuses to download. The only Gmail verdict visible here is the
+# SPAM label on the parent message, which is why a spam message's attachments
+# are refused wholesale. Everything else below is a
 # conservative type screen. A clean verdict means "not an obvious weapon",
 # never "scanned and safe".
 

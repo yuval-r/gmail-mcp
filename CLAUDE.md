@@ -111,8 +111,8 @@ tests/        — pytest; Gmail client is mocked, no live network
   verdict through the API and `attachments.get` will serve bytes the web UI
   blocks. The scan is a separate local step: files that pass the screen are
   written to `config.quarantine_dir()/<message_id>/` (under the attachment
-  root) and `_scan` runs `config.scan_command()` (`GMAIL_MCP_SCAN_CMD`, else
-  ClamAV `clamscan`) once over all of them (`_scan_files`); each file's
+  root) and `_scan_files` runs `config.scan_command()` (`GMAIL_MCP_SCAN_CMD`,
+  else ClamAV `clamscan`) once over all of them; each file's
   verdict is parsed from its own `<path>: OK` / `FOUND` line, else from the
   exit code. Only a clean verdict releases a file, by rename into
   `<root>/<message_id>/` after an `_inside_root` check on that dir. Threat,

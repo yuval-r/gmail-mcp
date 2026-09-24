@@ -695,9 +695,7 @@ def test_download_saves_external_attachment(fake_service, downloads, monkeypatch
     monkeypatch.setattr(
         FakeAttachments, "payloads", {"att-1": _b64url_bytes(PDF_BYTES)}
     )
-    out = server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    out = _download()
     saved = downloads / MID / "01-invoice.pdf"
     assert saved.exists()
     assert saved.read_bytes() == PDF_BYTES  # binary survives, not utf-8 mangled
@@ -709,9 +707,7 @@ def test_download_saves_inline_attachment(fake_service, downloads, monkeypatch):
     monkeypatch.setattr(FakeMessages, "full_message", _message_with(
         [_part("tiny.csv", "text/csv", data=_b64url_bytes(b"a,b,c"), size=5)]
     ))
-    server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    _download()
     assert (downloads / MID / "01-tiny.csv").read_bytes() == b"a,b,c"
 
 
@@ -719,9 +715,7 @@ def test_download_writes_owner_only_permissions(fake_service, downloads, monkeyp
     monkeypatch.setattr(FakeMessages, "full_message", _message_with(
         [_part("notes.txt", "text/plain", data=_b64url_bytes(b"x"), size=1)]
     ))
-    server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    _download()
     mode = (downloads / MID / "01-notes.txt").stat().st_mode & 0o777
     assert mode == 0o600
 
@@ -735,9 +729,7 @@ def test_download_refuses_blocked_type_and_writes_nothing(
     monkeypatch.setattr(
         FakeAttachments, "payloads", {"att-1": _b64url_bytes(b"MZ evil")}
     )
-    out = server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    out = _download()
     assert "Refused" in out
     assert ".exe" in out
     assert not (downloads / MID).exists() or not any((downloads / MID).iterdir())
@@ -755,9 +747,7 @@ def test_download_refuses_everything_on_spam_message(
     monkeypatch.setattr(
         FakeAttachments, "payloads", {"att-1": _b64url_bytes(PDF_BYTES)}
     )
-    out = server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    out = _download()
     assert "spam" in out.lower()
     assert not (downloads / MID / "01-invoice.pdf").exists()
 
@@ -767,9 +757,7 @@ def test_download_refuses_oversized(fake_service, downloads, monkeypatch):
     monkeypatch.setattr(FakeMessages, "full_message", _message_with(
         [_part("big.pdf", "application/pdf", "att-1", size=5000)]
     ))
-    out = server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    out = _download()
     assert "Refused" in out
     assert not (downloads / MID / "01-big.pdf").exists()
 
@@ -801,9 +789,7 @@ def test_download_rejects_out_of_range_index(fake_service, downloads, monkeypatc
 
 def test_download_no_attachments_is_clear(fake_service, downloads, monkeypatch):
     monkeypatch.setattr(FakeMessages, "full_message", _message_with([]))
-    out = server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    out = _download()
     assert "no attachments" in out.lower()
 
 
@@ -815,21 +801,21 @@ def test_download_sanitizes_traversal_filename(fake_service, downloads, monkeypa
     monkeypatch.setattr(
         FakeAttachments, "payloads", {"att-1": _b64url_bytes(b"nope")}
     )
-    server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    _download()
     written = list((downloads / MID).iterdir())
     assert len(written) == 1
     assert written[0].name == "01-pwned.txt"
     assert written[0].resolve().is_relative_to(downloads.resolve())
 
 
-def test_download_rejects_message_id_with_path_chars(fake_service, downloads):
+@pytest.mark.parametrize("bad_id", ["../../etc", "quarantine"])
+def test_download_rejects_non_hex_message_id(fake_service, downloads, bad_id):
+    # Path chars could walk out of the root; "quarantine" would name the
+    # quarantine dir that shares it. Gmail ids are hex, so both are refused.
     with pytest.raises(ValueError, match="message id"):
         server._dispatch("download_attachments", {
-            "account": "a@example.com", "message_id": "../../etc",
+            "account": "a@example.com", "message_id": bad_id,
         })
-
 
 def test_download_reports_gmail_error_per_attachment(
     fake_service, downloads, monkeypatch
@@ -841,9 +827,7 @@ def test_download_reports_gmail_error_per_attachment(
     ]))
     monkeypatch.setattr(FakeAttachments, "payloads", {"att-1": _b64url_bytes(b"ok")})
     monkeypatch.setattr(FakeAttachments, "errors", {"att-2"})
-    out = server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    out = _download()
     assert (downloads / MID / "01-good.pdf").read_bytes() == b"ok"
     assert "#2" in out
     assert not (downloads / MID / "02-gone.pdf").exists()
@@ -854,9 +838,7 @@ def test_download_warns_on_archive_but_saves(fake_service, downloads, monkeypatc
         [_part("docs.zip", "application/zip", "att-1")]
     ))
     monkeypatch.setattr(FakeAttachments, "payloads", {"att-1": _b64url_bytes(b"PK")})
-    out = server._dispatch(
-        "download_attachments", {"account": "a@example.com", "message_id": MID}
-    )
+    out = _download()
     assert (downloads / MID / "01-docs.zip").exists()
     assert "archive" in out.lower()
 
@@ -888,6 +870,31 @@ def _one_pdf(monkeypatch):
     monkeypatch.setattr(
         FakeAttachments, "payloads", {"att-1": _b64url_bytes(PDF_BYTES)}
     )
+
+
+def _two_pdfs(monkeypatch, first=b"a", second=b"b"):
+    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
+        _part("a.pdf", "application/pdf", "att-1"),
+        _part("b.pdf", "application/pdf", "att-2"),
+    ]))
+    monkeypatch.setattr(FakeAttachments, "payloads", {
+        "att-1": _b64url_bytes(first), "att-2": _b64url_bytes(second),
+    })
+
+
+def _per_file_scanner(marker: bytes, result: str, exit_code: int) -> list[str]:
+    """A ClamAV-style scanner: `<path>: <result>` for files holding marker,
+    `<path>: OK` for the rest, and exit_code if any file matched."""
+    code = (
+        "import sys, pathlib\n"
+        "hit_any = False\n"
+        "for a in sys.argv[1:]:\n"
+        f"    hit = pathlib.Path(a).read_bytes() == {marker!r}\n"
+        "    hit_any = hit_any or hit\n"
+        f"    print(a + (': ' + {result!r} if hit else ': OK'))\n"
+        f"sys.exit({exit_code} if hit_any else 0)\n"
+    )
+    return [sys.executable, "-c", code]
 
 
 def _download():
@@ -955,58 +962,28 @@ def test_download_without_scanner_stays_in_quarantine(fake_service, downloads, m
 
 def test_download_threat_holds_only_the_bad_file(fake_service, downloads, monkeypatch):
     # A hit on one file must not hold the clean ones.
-    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
-        _part("clean.pdf", "application/pdf", "att-1"),
-        _part("bad.pdf", "application/pdf", "att-2"),
-    ]))
-    monkeypatch.setattr(FakeAttachments, "payloads", {
-        "att-1": _b64url_bytes(b"ok"), "att-2": _b64url_bytes(b"EICAR"),
-    })
-    code = (
-        "import sys, pathlib\n"
-        "bad = False\n"
-        "for a in sys.argv[1:]:\n"
-        "    hit = pathlib.Path(a).read_bytes() == b'EICAR'\n"
-        "    bad = bad or hit\n"
-        "    print(a + (': Eicar-Test-Signature FOUND' if hit else ': OK'))\n"
-        "sys.exit(1 if bad else 0)\n"
-    )
-    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
+    _two_pdfs(monkeypatch, b"ok", b"EICAR")
+    monkeypatch.setattr(server.config, "scan_command", lambda: _per_file_scanner(
+        b"EICAR", "Eicar-Test-Signature FOUND", exit_code=1,
+    ))
     out = _download()
-    assert (downloads / MID / "01-clean.pdf").read_bytes() == b"ok"
-    assert (downloads / "quarantine" / MID / "02-bad.pdf").exists()
-    assert not (downloads / MID / "02-bad.pdf").exists()
+    assert (downloads / MID / "01-a.pdf").read_bytes() == b"ok"
+    assert (downloads / "quarantine" / MID / "02-b.pdf").exists()
+    assert not (downloads / MID / "02-b.pdf").exists()
     assert "Eicar-Test-Signature FOUND" in out
     assert "NOT released" in out
 
-
-def test_download_scan_error_holds_only_that_file(
-    fake_service, downloads, monkeypatch
-):
-    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
-        _part("clean.pdf", "application/pdf", "att-1"),
-        _part("locked.pdf", "application/pdf", "att-2"),
-    ]))
-    monkeypatch.setattr(FakeAttachments, "payloads", {
-        "att-1": _b64url_bytes(b"ok"), "att-2": _b64url_bytes(b"LOCKED"),
-    })
-    code = (
-        "import sys, pathlib\n"
-        "bad = False\n"
-        "for a in sys.argv[1:]:\n"
-        "    hit = pathlib.Path(a).read_bytes() == b'LOCKED'\n"
-        "    bad = bad or hit\n"
-        "    print(a + (': Can not open file ERROR' if hit else ': OK'))\n"
-        "sys.exit(2 if bad else 0)\n"
-    )
-    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
+def test_download_scan_error_holds_only_that_file(fake_service, downloads, monkeypatch):
+    _two_pdfs(monkeypatch, b"ok", b"LOCKED")
+    monkeypatch.setattr(server.config, "scan_command", lambda: _per_file_scanner(
+        b"LOCKED", "Can not open file ERROR", exit_code=2,
+    ))
     out = _download()
-    assert (downloads / MID / "01-clean.pdf").exists()
-    assert (downloads / "quarantine" / MID / "02-locked.pdf").exists()
+    assert (downloads / MID / "01-a.pdf").exists()
+    assert (downloads / "quarantine" / MID / "02-b.pdf").exists()
     assert "scan failed" in out
     # Scanner output is printed once, in its own section, not per file line.
     assert out.count("Can not open file ERROR") == 1
-
 
 def test_download_replaces_symlink_at_target_name(fake_service, downloads, monkeypatch, tmp_path):
     # rename(2) replaces a planted link; it must neither follow it nor abort.
@@ -1050,16 +1027,6 @@ def test_download_refuses_symlinked_message_dir(fake_service, downloads, monkeyp
     assert (downloads / "quarantine" / MID / "01-invoice.pdf").exists()
     assert "could not be moved out of quarantine" in out
     assert "outside the attachment root" in out
-
-
-def _two_pdfs(monkeypatch):
-    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
-        _part("a.pdf", "application/pdf", "att-1"),
-        _part("b.pdf", "application/pdf", "att-2"),
-    ]))
-    monkeypatch.setattr(FakeAttachments, "payloads", {
-        "att-1": _b64url_bytes(b"a"), "att-2": _b64url_bytes(b"b"),
-    })
 
 
 def test_download_scans_all_files_in_one_run(fake_service, downloads, monkeypatch, tmp_path):
@@ -1167,17 +1134,6 @@ def test_download_clean_release_removes_empty_quarantine_dir(fake_service, downl
     _download()
     assert not (downloads / "quarantine" / MID).exists()
 
-
-def test_download_rejects_reserved_quarantine_id(fake_service, downloads):
-    # The quarantine dir shares the root with per-message dirs, so a message
-    # id must never be able to name it. Gmail ids are hex; "quarantine" is not.
-    with pytest.raises(ValueError, match="message id"):
-        server._dispatch("download_attachments", {
-            "account": "a@example.com", "message_id": "quarantine",
-        })
-
-
-# --- update / delete drafts -------------------------------------------------
 
 def test_update_draft_replaces_message_in_place(fake_service):
     out = server._dispatch(
