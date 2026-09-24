@@ -668,6 +668,7 @@ async def list_tools() -> list[Tool]:
                             f"{_READ_MESSAGES_MAX})."
                         ),
                         "default": 25,
+                        "minimum": 1,
                         "maximum": _READ_MESSAGES_MAX,
                     },
                 },
@@ -1416,7 +1417,9 @@ def _do_bulk_action(args: dict[str, Any]) -> str:
 
 def _do_read_messages(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
-    cap = min(args.get("max_results", 25), _READ_MESSAGES_MAX)
+    # Clamp to 1.._READ_MESSAGES_MAX: a negative cap would slice ids[:-n]
+    # and read nearly every id it was given.
+    cap = max(1, min(int(args.get("max_results", 25)), _READ_MESSAGES_MAX))
     ids: list[str] = list(args.get("message_ids") or [])
     if not ids and args.get("query"):
         ids, _ = _list_ids(service, args["query"], cap)

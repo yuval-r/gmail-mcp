@@ -372,6 +372,17 @@ def test_read_messages_caps_the_count(fake_service):
     assert out.startswith(f"Read {server._READ_MESSAGES_MAX} message(s)")
 
 
+@pytest.mark.parametrize("bad", [-5, 0, "7"])
+def test_read_messages_cap_cannot_be_bypassed(fake_service, bad):
+    # A negative cap used to slice ids[:-5], reading all but five of them.
+    ids = [f"{i:016x}" for i in range(150)]
+    out = server._dispatch("read_messages", {
+        "account": "a@example.com", "message_ids": ids, "max_results": bad,
+    })
+    n = int(out.split()[1])
+    assert 1 <= n <= server._READ_MESSAGES_MAX
+
+
 def test_read_messages_fetches_in_one_batch(fake_service):
     server._dispatch("read_messages", {
         "account": "a@example.com", "message_ids": ["m1", "m2", "m3"],
