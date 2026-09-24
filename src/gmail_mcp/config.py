@@ -132,8 +132,9 @@ def scan_command() -> list[str] | None:
     turns scanning off). Otherwise uses ClamAV's ``clamscan`` if it is
     installed. The server runs it once per download, with every file path
     appended to the argv. Per-file results are read from ClamAV-style lines
-    (``<path>: OK`` / ``<path>: <sig> FOUND``); a scanner that prints none is
-    judged by exit code alone: 0 clean, anything else holds every file.
+    (``<path>: OK`` or ``Empty file`` / ``<path>: <sig> FOUND``); a scanner
+    that prints none is judged by exit code alone: 0 clean, anything else
+    holds every file.
     """
     raw = os.environ.get("GMAIL_MCP_SCAN_CMD")
     if raw is not None:

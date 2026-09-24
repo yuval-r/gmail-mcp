@@ -34,6 +34,17 @@ def test_existing_db_is_tightened(tmp_path):
     assert db.stat().st_mode & 0o777 == 0o600
 
 
+def test_not_owned_db_does_not_break_the_store(tmp_path, monkeypatch):
+    # chmod fails on a file someone else owns; the store must still open.
+    import gmail_mcp.store as store_mod
+
+    def deny(path, mode):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(store_mod.os, "chmod", deny)
+    TokenStore(path=tmp_path / "tokens.db").list_accounts()
+
+
 def test_empty_list(store):
     assert store.list_accounts() == []
     assert store.get("nobody@example.com") is None

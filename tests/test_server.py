@@ -10,6 +10,7 @@ import asyncio
 import base64
 import sys
 import time
+from pathlib import Path
 
 import pytest
 from googleapiclient.errors import HttpError
@@ -909,15 +910,22 @@ def _download():
     )
 
 
+def _held(downloads, name):
+    """The quarantined copy of name, in whichever per-call dir holds it."""
+    return next((downloads / "quarantine" / MID).glob(f"*/{name}"), None)
+
+
 def test_download_scans_quarantined_files(fake_service, downloads, monkeypatch, tmp_path):
     log = tmp_path / "argv.txt"
     monkeypatch.setattr(server.config, "scan_command", lambda: _scanner(0, argv_log=log))
     _one_pdf(monkeypatch)
     _download()
-    # The scanner sees the file where it was written: inside quarantine.
-    assert log.read_text().splitlines() == [
-        str(downloads / "quarantine" / MID / "01-invoice.pdf")
-    ]
+    # The scanner sees the file where it was written: in this call's own
+    # directory under quarantine/<message_id>/.
+    (scanned,) = log.read_text().splitlines()
+    scanned_path = Path(scanned)
+    assert scanned_path.name == "01-invoice.pdf"
+    assert scanned_path.parent.parent == downloads / "quarantine" / MID
 
 
 def test_download_clean_scan_releases_file(fake_service, downloads, monkeypatch):
@@ -925,20 +933,18 @@ def test_download_clean_scan_releases_file(fake_service, downloads, monkeypatch)
     out = _download()
     released = downloads / MID / "01-invoice.pdf"
     assert released.read_bytes() == PDF_BYTES
-    assert not (downloads / "quarantine" / MID / "01-invoice.pdf").exists()
+    assert _held(downloads, "01-invoice.pdf") is None
     assert str(released) in out
     assert "scan: clean" in out
 
 
 def test_download_threat_stays_in_quarantine(fake_service, downloads, monkeypatch):
-    held = downloads / "quarantine" / MID / "01-invoice.pdf"
-    monkeypatch.setattr(
-        server.config, "scan_command",
-        lambda: _scanner(1, stdout=f"{held}: Eicar-Test-Signature FOUND"),
-    )
+    monkeypatch.setattr(server.config, "scan_command", lambda: _per_file_scanner(
+        PDF_BYTES, "Eicar-Test-Signature FOUND", exit_code=1,
+    ))
     _one_pdf(monkeypatch)
     out = _download()
-    assert held.exists()
+    assert _held(downloads, "01-invoice.pdf") is not None
     assert not (downloads / MID / "01-invoice.pdf").exists()
     assert "Eicar-Test-Signature FOUND" in out
     assert "NOT released" in out
@@ -950,7 +956,7 @@ def test_download_scan_error_stays_in_quarantine(fake_service, downloads, monkey
     )
     _one_pdf(monkeypatch)
     out = _download()
-    assert (downloads / "quarantine" / MID / "01-invoice.pdf").exists()
+    assert _held(downloads, "01-invoice.pdf") is not None
     assert not (downloads / MID).exists()
     assert "scan failed" in out
     assert "NOT released" in out
@@ -960,7 +966,7 @@ def test_download_without_scanner_stays_in_quarantine(fake_service, downloads, m
     monkeypatch.setattr(server.config, "scan_command", lambda: None)
     _one_pdf(monkeypatch)
     out = _download()
-    assert (downloads / "quarantine" / MID / "01-invoice.pdf").exists()
+    assert _held(downloads, "01-invoice.pdf") is not None
     assert not (downloads / MID).exists()
     assert "NOT scanned" in out
     assert "NOT released" in out
@@ -974,7 +980,7 @@ def test_download_threat_holds_only_the_bad_file(fake_service, downloads, monkey
     ))
     out = _download()
     assert (downloads / MID / "01-a.pdf").read_bytes() == b"ok"
-    assert (downloads / "quarantine" / MID / "02-b.pdf").exists()
+    assert _held(downloads, "02-b.pdf") is not None
     assert not (downloads / MID / "02-b.pdf").exists()
     assert "Eicar-Test-Signature FOUND" in out
     assert "NOT released" in out
@@ -987,7 +993,7 @@ def test_download_scan_error_holds_only_that_file(fake_service, downloads, monke
     ))
     out = _download()
     assert (downloads / MID / "01-a.pdf").exists()
-    assert (downloads / "quarantine" / MID / "02-b.pdf").exists()
+    assert _held(downloads, "02-b.pdf") is not None
     assert "scan failed" in out
     # Scanner output is printed once, in its own section, not per file line.
     assert out.count("Can not open file ERROR") == 1
@@ -1017,7 +1023,7 @@ def test_download_release_failure_is_reported_not_raised(
 
     monkeypatch.setattr(server.os, "replace", failing_replace)
     out = _download()
-    assert (downloads / "quarantine" / MID / "01-invoice.pdf").exists()
+    assert _held(downloads, "01-invoice.pdf") is not None
     assert "#1" in out and "could not be moved out of quarantine" in out
     assert "#1 disk full" in out
 
@@ -1032,7 +1038,7 @@ def test_download_refuses_symlinked_message_dir(fake_service, downloads, monkeyp
     _one_pdf(monkeypatch)
     out = _download()
     assert not any(outside.iterdir())
-    assert (downloads / "quarantine" / MID / "01-invoice.pdf").exists()
+    assert _held(downloads, "01-invoice.pdf") is not None
     assert "could not be moved out of quarantine" in out
     assert "outside the attachment root" in out
 
@@ -1116,31 +1122,21 @@ def test_download_output_omits_sender_mime_type(fake_service, downloads, monkeyp
     assert "ignore-prior-instructions" not in out
 
 
-def test_download_same_message_is_serialized(fake_service, downloads, monkeypatch):
-    # Two calls for one message must not share quarantine files mid-scan.
-    import threading
-
-    active = []
-    overlap = []
+def test_download_calls_never_share_quarantine_files(fake_service, downloads, monkeypatch):
+    # A retried call must not rewrite a file another call is scanning, so
+    # each call writes into its own directory. No lock is needed.
+    seen = []
     real_scan = server._scan_files
 
-    def slow_scan(paths):
-        active.append(1)
-        if len(active) > 1:
-            overlap.append(True)
-        time.sleep(0.2)
-        active.pop()
+    def record(paths):
+        seen.extend(p.parent for p in paths)
         return real_scan(paths)
 
-    monkeypatch.setattr(server, "_scan_files", slow_scan)
+    monkeypatch.setattr(server, "_scan_files", record)
     _one_pdf(monkeypatch)
-    threads = [threading.Thread(target=_download) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert not overlap
-
+    _download()
+    _download()
+    assert len(seen) == 2 and seen[0] != seen[1]
 
 def test_download_all_refused_runs_no_scanner(fake_service, downloads, monkeypatch):
     # With nothing written, clamscan must not run: with no paths it would

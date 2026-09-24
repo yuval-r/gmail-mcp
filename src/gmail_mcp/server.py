@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import subprocess
-import threading
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -828,8 +828,8 @@ def _reply_headers(service: Any, thread_id: str) -> tuple[str | None, str | None
 #
 # The only place this server writes to the filesystem. Three rules hold it in:
 #
-#   1. ONE ROOT. Everything lands under config.attachments_dir(): first in
-#      quarantine/<message_id>/, then, after a clean virus scan, in
+#   1. ONE ROOT. Everything lands under config.attachments_dir(): first in a
+#      per-call quarantine/<message_id>/dl-*/, then, after a clean scan, in
 #      <message_id>/. There is no caller-supplied destination, because a
 #      dest_dir argument would be an arbitrary-file-write primitive that an
 #      instruction embedded in an email could aim anywhere ("save the attached
@@ -852,11 +852,6 @@ _MESSAGE_ID_RE = re.compile(r"[0-9a-fA-F]+")
 # slow disks and large archives.
 _SCAN_TIMEOUT_S = 300
 _SCAN_OUTPUT_CHARS = 500
-
-# Downloads share quarantine paths per message, so two calls for the same
-# message (a client retry during a slow scan) must not interleave: one could
-# rewrite a file after the other scanned it. Downloads are rare; one lock.
-_DOWNLOAD_LOCK = threading.Lock()
 
 
 def _attachment_bytes(service: Any, message_id: str, att: Attachment) -> bytes:
@@ -915,8 +910,8 @@ def _scan_files(paths: list[Path]) -> list[tuple[str, str]]:
     Verdict is ``clean``, ``threat``, ``error``, ``timeout``, ``broken`` (the
     scanner could not start) or ``unscanned``. Only ``clean`` may release a
     file. Each file's verdict comes from its own ClamAV-style result line:
-    ``<path>: OK`` is clean, ``<path>: <sig> FOUND`` a threat, any other line
-    an error. A file with no line falls back to the exit code: 0 is clean,
+    ``<path>: OK`` or ``<path>: Empty file`` is clean, ``<path>: <sig> FOUND``
+    a threat, any other line an error. A file with no line falls back to the exit code: 0 is clean,
     anything else an error.
     """
     if not paths:
@@ -993,11 +988,6 @@ def _select_attachments(
 
 
 def _do_download_attachments(args: dict) -> str:
-    with _DOWNLOAD_LOCK:
-        return _download_attachments(args)
-
-
-def _download_attachments(args: dict) -> str:
     message_id = args["message_id"]
     if not _MESSAGE_ID_RE.fullmatch(message_id):
         raise ValueError(
@@ -1017,7 +1007,12 @@ def _download_attachments(args: dict) -> str:
         return f"Message {message_id} has no attachments."
 
     selected = _select_attachments(msg, args.get("index"))
-    held_dir = config.quarantine_dir() / message_id
+    # Each call writes into its own fresh directory, so a retried or parallel
+    # call (even from another server process) can never rewrite a file that
+    # this call is scanning.
+    message_quarantine = config.quarantine_dir() / message_id
+    message_quarantine.mkdir(mode=0o700, parents=True, exist_ok=True)
+    held_dir = Path(tempfile.mkdtemp(prefix="dl-", dir=message_quarantine))
     max_bytes = config.max_attachment_bytes()
 
     # (ordinal, path in quarantine, "(type, size) [warning]")
@@ -1086,8 +1081,9 @@ def _download_attachments(args: dict) -> str:
                 held.append(((ordinal, path, info), "release", str(e)))
                 continue
             released.append(f"  #{ordinal}  {target} {info}")
-    with contextlib.suppress(OSError):
-        held_dir.rmdir()  # succeeds only once nothing is held there
+    for empty in (held_dir, message_quarantine):
+        with contextlib.suppress(OSError):
+            empty.rmdir()  # succeeds only once nothing is held there
 
     lines: list[str] = []
     if released:

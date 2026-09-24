@@ -388,7 +388,8 @@ low-stakes:
   There is no malware field on the message or attachment resource, and
   `attachments.get` will serve bytes the Gmail web UI refuses to let you
   download. So files that pass the screen are written to
-  `~/.gmail-mcp/attachments/quarantine/<message_id>/` and handed to a local
+  a fresh per-download folder under `~/.gmail-mcp/attachments/quarantine/<message_id>/`
+  and handed to a local
   scanner: ClamAV's `clamscan` when it is installed, or whatever
   `GMAIL_MCP_SCAN_CMD` names, in one run per download. Each file's verdict
   comes from its own result line, and only a file that scans clean moves to
@@ -478,7 +479,7 @@ All optional — sane defaults under `~/.gmail-mcp/`.
 | `GMAIL_MCP_CLIENT_SECRET` | `~/.gmail-mcp/client_secret.json` | Downloaded Google OAuth client. |
 | `GMAIL_MCP_OAUTH_PORT` | `8765` | Fixed loopback port for the auth flow (forward this over SSH on a headless box). |
 | `GMAIL_MCP_ATTACHMENT_DIR` | `~/.gmail-mcp/attachments` | Download root for `download_attachments`. Files land in a per-message subdirectory. This is the only location the server writes to. |
-| `GMAIL_MCP_SCAN_CMD` | `clamscan` if installed | Virus scanner run on quarantined downloads, split like a shell command and run once per download, with every file path appended. Per-file results come from ClamAV-style `<path>: OK` / `<path>: <sig> FOUND` lines; a scanner that prints none must exit 0 for clean (anything else holds every file). The default `clamscan` runs with `--alert-exceeds-max`, so an archive too deep or too large to scan fully is held, not passed; add it to a custom `clamscan` command too. An empty value turns scanning off, so downloads stay in quarantine. |
+| `GMAIL_MCP_SCAN_CMD` | `clamscan` if installed | Virus scanner run on quarantined downloads, split like a shell command and run once per download, with every file path appended. Per-file results come from ClamAV-style `<path>: OK` (or `Empty file`) / `<path>: <sig> FOUND` lines; a scanner that prints none must exit 0 for clean (anything else holds every file). The default `clamscan` runs with `--alert-exceeds-max`, so an archive too deep or too large to scan fully is held, not passed; add it to a custom `clamscan` command too. An empty value turns scanning off, so downloads stay in quarantine. |
 | `GMAIL_MCP_MAX_ATTACHMENT_BYTES` | `26214400` (25 MB) | Per-attachment size ceiling. Gmail's own limit is 25 MB, so this refuses nothing Gmail would deliver. `0` (or negative) means unlimited. |
 | `GMAIL_MCP_MAX_BODY_CHARS` | `500` | Default per-message body cap for `read_message`/`read_thread`. Deliberately tight so reads are cheap by default; `0` (or negative) means unlimited, and a per-call `max_body_chars` argument overrides it. |
 

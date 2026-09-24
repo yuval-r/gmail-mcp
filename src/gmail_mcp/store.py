@@ -19,6 +19,7 @@ Schema::
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from gmail_mcp.config import db_path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,7 +55,11 @@ class TokenStore:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._init_db()
         # Refresh tokens live here: owner-only, even for a DB made before this.
-        os.chmod(self.path, 0o600)
+        try:
+            os.chmod(self.path, 0o600)
+        except PermissionError:
+            # Not our file to change; still usable if it is readable.
+            logger.warning("Could not make %s owner-only", self.path)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)

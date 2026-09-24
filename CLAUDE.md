@@ -39,8 +39,9 @@ tests/        — pytest; Gmail client is mocked, no live network
   JSON at `~/.gmail-mcp/client_secret.json` (env `GMAIL_MCP_CLIENT_SECRET`).
   Never hardcode `client_id`/`client_secret`.
 - **Token store**: SQLite at `~/.gmail-mcp/tokens.db` (env `GMAIL_MCP_DB`).
-  Keyed by email. `TokenStore` makes the DB `0o600` and a new parent dir
-  `0o700`, since it holds refresh tokens. Holds refresh_token + last access-token blob + scopes.
+  Keyed by email. Holds refresh_token + last access-token blob + scopes, so
+  `TokenStore` makes the DB `0o600` and a new parent dir `0o700` (it logs,
+  not fails, when it cannot chmod a DB it does not own).
 - **Refresh**: google-auth's `Request` transport refreshes the access token
   on demand; `build_service` persists the refreshed blob back to the DB.
 - **Scopes** (one constant, `config.SCOPES`): `gmail.readonly`,
@@ -104,28 +105,29 @@ tests/        — pytest; Gmail client is mocked, no live network
   the root, then writes `0o600` with `O_NOFOLLOW`. The message id is validated
   against `_MESSAGE_ID_RE` before it becomes a directory name.
 - **Attachments are type-screened, then virus-scanned in quarantine.**
-  `screen_attachment` refuses Gmail's own blocked-file-type list, macro-enabled
-  Office documents, executable MIME types, oversized payloads, and every
-  attachment on a `SPAM`-labeled message. It checks *all* dot-suffixes, so
-  `invoice.pdf.exe` is caught. Archives are allowed with a warning. That screen
-  is a type check, never call it a scan: Gmail does **not** expose its malware
-  verdict through the API and `attachments.get` will serve bytes the web UI
-  blocks. The scan is a separate local step: files that pass the screen are
-  written to `config.quarantine_dir()/<message_id>/` (under the attachment
-  root) and `_scan_files` runs `config.scan_command()` (`GMAIL_MCP_SCAN_CMD`,
-  else ClamAV `clamscan`) once over all of them; each file's
-  verdict is parsed from its own `<path>: OK` / `FOUND` line, else from the
-  exit code. Only a clean verdict releases a file, by rename into
+  `screen_attachment` refuses Gmail's own blocked-file-type list,
+  macro-enabled Office documents, executable MIME types, oversized payloads,
+  and every attachment on a `SPAM`-labeled message. It checks *all*
+  dot-suffixes, so `invoice.pdf.exe` is caught. Archives are allowed with a
+  warning. That screen is a type check, never call it a scan: Gmail does
+  **not** expose its malware verdict through the API and `attachments.get`
+  will serve bytes the web UI blocks. The scan is a separate local step: files
+  that pass the screen are written to a fresh per-call dir,
+  `config.quarantine_dir()/<message_id>/dl-*/` (under the attachment root) and
+  `_scan_files` runs `config.scan_command()` (`GMAIL_MCP_SCAN_CMD`, else
+  ClamAV `clamscan`) once over all of them; each file's verdict is parsed from
+  its own `<path>: OK` (or `Empty file`) / `FOUND` line, else from the exit
+  code. Only a clean verdict releases a file, by rename into
   `<root>/<message_id>/` after an `_inside_root` check on that dir. Threat,
   scanner error, a scanner that cannot run, no scanner, or a failed rename
-  means it stays held, reported per `#N`; nothing purges held files.
-  Never release without a clean scan. The default argv carries
+  means it stays held, reported per `#N`; nothing purges held files. Never
+  release without a clean scan. The default argv carries
   `--alert-exceeds-max`: without it clamscan prints `OK` for content it
-  skipped at a limit (e.g. EICAR nested 20 zips deep). `_DOWNLOAD_LOCK`
-  serializes downloads so two calls never share quarantine files mid-scan.
-  The download result omits the MIME type: it is sender-chosen and that
-  output is trusted text. `_MESSAGE_ID_RE` is hex-only so no
-  message id can name the `quarantine` dir.
+  skipped at a limit (e.g. EICAR nested 20 zips deep). The per-call dir means
+  two calls (or two server processes) never share a file mid-scan; do not
+  replace it with a shared path plus a lock. The download result omits the
+  MIME type: it is sender-chosen and that output is trusted text.
+  `_MESSAGE_ID_RE` is hex-only so no message id can name the `quarantine` dir.
 - **Attachments are addressed by `#N`, not by attachment id.** `_parsed_body`
   numbers them and deliberately omits the raw `attachmentId`; the download tool
   takes the same ordinal. Both sides get their ordering from one payload walk
