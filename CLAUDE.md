@@ -161,7 +161,8 @@ tests/        — pytest; Gmail client is mocked, no live network
 - **Status labels are trusted output.** Formatters print Gmail system labels
   (`gmail.status_tag`: DRAFT, SENT, INBOX, UNREAD, SPAM, TRASH) after each id in
   the trusted manifest, never inside the fence. Drafts otherwise look exactly
-  like sent mail. `_summarize_message` must keep returning `labelIds`.
+  like sent mail. `gmail.summarize_resource` must keep filling
+  `MessageSummary.label_ids`.
 - **Run from a stable install, not a uvx cache env.** A `uv cache clean` can
   delete a uvx env under a running server; later lazy reads from the install
   dir then fail. `gmail._GMAIL_DISCOVERY_DOC` (read once at import, clients via

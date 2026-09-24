@@ -74,10 +74,14 @@ def test_list_accounts_nonempty(store):
 # --- mocked Gmail client ----------------------------------------------------
 
 class FakeExec:
+    # num_retries passed to each direct execute(), in call order.
+    retries: list[int] = []
+
     def __init__(self, result):
         self._result = result
 
-    def execute(self):
+    def execute(self, num_retries=0):
+        FakeExec.retries.append(num_retries)
         return self._result
 
 
@@ -291,6 +295,9 @@ class FakeBatch:
         self.items = []
 
     def add(self, request, request_id):
+        # The real client refuses a repeated request id.
+        if any(rid == request_id for rid, _ in self.items):
+            raise KeyError("A request with this ID already exists")
         self.items.append((request_id, request))
 
     def execute(self):
@@ -300,7 +307,7 @@ class FakeBatch:
             if mid in FakeBatch.fail_ids:
                 self.callback(rid, None, HttpError(_FakeResp(429), b"rate"))
             else:
-                self.callback(rid, req.execute(), None)
+                self.callback(rid, req._result, None)
 
 
 class FakeService:
@@ -337,11 +344,35 @@ def test_search_summaries_are_fetched_in_one_batch(fake_service):
     assert fake_service.recorder["batches"] == [2]
 
 
-def test_search_retries_failed_batch_items_singly(fake_service, monkeypatch):
+def test_search_retries_failed_batch_items_with_backoff(fake_service, monkeypatch):
     monkeypatch.setattr(FakeBatch, "fail_ids", {"m2"})
+    monkeypatch.setattr(FakeExec, "retries", [])
     out = server._dispatch("search_messages", {"account": "a@example.com", "query": "x"})
-    # m2 failed inside the batch, then succeeded on its own.
+    # m2 failed inside the batch, then succeeded on its own, and that refetch
+    # let the client back off on 429/5xx instead of failing at once.
     assert "subj-m1" in out and "subj-m2" in out
+    assert FakeExec.retries[-1] == 3
+
+
+def test_batch_get_tolerates_duplicate_ids(fake_service):
+    got = server._batch_get(fake_service, ["m1", "m1", "m2"], format="metadata")
+    assert [g["id"] for g in got] == ["m1", "m1", "m2"]
+
+
+def test_read_messages_fetches_in_one_batch(fake_service):
+    server._dispatch("read_messages", {
+        "account": "a@example.com", "message_ids": ["m1", "m2", "m3"],
+    })
+    assert fake_service.recorder["batches"] == [3]
+
+
+def test_search_all_rejects_unknown_page_token_account(store, monkeypatch):
+    store.upsert("a@example.com", "r")
+    monkeypatch.setattr(server, "build_service", lambda acct, st: FakeService())
+    with pytest.raises(ValueError, match="ghost@example.com"):
+        server._dispatch("search_all_accounts", {
+            "query": "q", "page_tokens": {"ghost@example.com": "t"},
+        })
 
 
 def test_search_all_accounts_pages_per_account(store, monkeypatch):
@@ -1263,6 +1294,9 @@ def test_purge_never_follows_symlinks(downloads, monkeypatch, tmp_path):
     (downloads / "quarantine" / "linkdir").symlink_to(outside)
     server._purge_quarantine()
     assert victim.read_bytes() == b"keep"
+    # lstat, not stat: the links themselves are left alone too.
+    assert (held / "link").is_symlink()
+    assert (downloads / "quarantine" / "linkdir").is_symlink()
 
 
 def test_download_runs_the_purge(fake_service, downloads, monkeypatch):

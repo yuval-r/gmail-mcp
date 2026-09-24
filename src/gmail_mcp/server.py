@@ -119,22 +119,18 @@ def _list_ids(
 
 
 # Gmail allows 100 calls per batch but rate-limits large ones; 50 is its advice.
-_SUMMARY_BATCH = 50
+_BATCH_SIZE = 50
+# Retries for a single refetch; the client backs off on 429 and 5xx itself.
+_REFETCH_RETRIES = 3
 
 
-def _summary_request(service: Any, message_id: str) -> Any:
-    return service.users().messages().get(
-        userId="me", id=message_id, format="metadata",
-        metadataHeaders=SUMMARY_HEADERS,
-    )
+def _batch_get(service: Any, ids: list[str], **params: Any) -> list[dict[str, Any]]:
+    """messages.get for every id, in order, in batched HTTP calls.
 
-
-def _summarize_messages(service: Any, ids: list[str]) -> list[MessageSummary]:
-    """Summaries for ids, in order, fetched in batched HTTP calls.
-
-    A batch can fail single items (Gmail answers 429 per item under load);
-    those are fetched again one at a time, so one throttled item does not
-    fail the whole search.
+    A batch can fail single items (Gmail answers 429 per item under load).
+    Those are fetched again one at a time with the client's own exponential
+    backoff, so one throttled item does not fail the call. Repeated ids are
+    fetched once.
     """
     found: dict[str, dict[str, Any]] = {}
 
@@ -142,15 +138,19 @@ def _summarize_messages(service: Any, ids: list[str]) -> list[MessageSummary]:
         if exception is None:
             found[request_id] = response
 
-    for start in range(0, len(ids), _SUMMARY_BATCH):
+    def request(mid: str) -> Any:
+        return service.users().messages().get(userId="me", id=mid, **params)
+
+    unique = list(dict.fromkeys(ids))
+    for start in range(0, len(unique), _BATCH_SIZE):
         batch = service.new_batch_http_request(callback=collect)
-        for mid in ids[start:start + _SUMMARY_BATCH]:
-            batch.add(_summary_request(service, mid), request_id=mid)
+        for mid in unique[start:start + _BATCH_SIZE]:
+            batch.add(request(mid), request_id=mid)
         batch.execute()
-    for mid in ids:
+    for mid in unique:
         if mid not in found:
-            found[mid] = _summary_request(service, mid).execute()
-    return [summarize_resource(found[mid]) for mid in ids]
+            found[mid] = request(mid).execute(num_retries=_REFETCH_RETRIES)
+    return [found[mid] for mid in ids]
 
 
 def _search(
@@ -158,7 +158,10 @@ def _search(
 ) -> tuple[list[MessageSummary], str | None]:
     """Return one page of message summaries and the next page's token."""
     ids, next_token = _list_ids(service, query, max_results, page_token)
-    return _summarize_messages(service, ids), next_token
+    resources = _batch_get(
+        service, ids, format="metadata", metadataHeaders=SUMMARY_HEADERS
+    )
+    return [summarize_resource(r) for r in resources], next_token
 
 
 # ---------------------------------------------------------------------------
@@ -1011,7 +1014,7 @@ def _purge_quarantine() -> None:
             for name in files:
                 path = Path(d) / name
                 if _older(path, cutoff, stat.S_ISREG):
-                    path.unlink()
+                    path.unlink(missing_ok=True)
             for name in dirs:
                 if Path(d) / name in old_dirs:
                     with contextlib.suppress(OSError):
@@ -1021,9 +1024,15 @@ def _purge_quarantine() -> None:
 
 
 def _older(path: Path, cutoff: float, is_kind: Callable[[int], bool]) -> bool:
-    """True for a path of the given kind (never a symlink) last changed before cutoff."""
-    st = path.lstat()
-    return bool(is_kind(st.st_mode)) and st.st_mtime < cutoff
+    """True for a path of the given kind (never a symlink) last changed before cutoff.
+
+    False for a path a parallel purge already removed.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return False
+    return is_kind(st.st_mode) and st.st_mtime < cutoff
 
 
 def _select_attachments(
@@ -1410,13 +1419,7 @@ def _do_read_messages(args: dict[str, Any]) -> str:
         )
     ids = list(dict.fromkeys(ids))[:cap]
     blocks = [f"Read {len(ids)} message(s) from {args['account']}:\n"]
-    for mid in ids:
-        resource = (
-            service.users()
-            .messages()
-            .get(userId="me", id=mid, format="full")
-            .execute()
-        )
+    for resource in _batch_get(service, ids, format="full"):
         blocks.append(format_parsed_message(parse_message(resource)))
     return ("\n\n" + "-" * 60 + "\n\n").join(blocks)
 
@@ -1459,6 +1462,12 @@ def _do_search_all(args: dict[str, Any]) -> str:
     # A follow-up page continues only the accounts that still had more.
     page_tokens: dict[str, str] = args.get("page_tokens") or {}
     if page_tokens:
+        unknown = set(page_tokens) - {a.email for a in accounts}
+        if unknown:
+            raise ValueError(
+                f"page_tokens names unknown account(s) {sorted(unknown)}; "
+                f"authorized: {[a.email for a in accounts]}."
+            )
         accounts = [a for a in accounts if a.email in page_tokens]
     blocks: list[str] = [f"Search '{query}' across {len(accounts)} account(s):\n"]
     next_tokens: dict[str, str] = {}
