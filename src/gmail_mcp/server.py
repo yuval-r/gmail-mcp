@@ -10,6 +10,7 @@ stored inbox at once.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -865,20 +866,28 @@ def _attachment_bytes(service: Any, message_id: str, att: Attachment) -> bytes:
     return decode_b64url_bytes(resp.get("data", ""))
 
 
+def _inside_root(path: Path) -> Path:
+    """Return ``path`` resolved, refusing it unless it is under the root.
+
+    Names are already inert basenames; this re-checks anyway, because a
+    containment bug here is a whole-filesystem bug, and a symlinked directory
+    would otherwise carry a write out of the root.
+    """
+    resolved = path.resolve()
+    if not resolved.is_relative_to(config.attachments_dir().resolve()):
+        raise ValueError(
+            f"Refusing to write outside the attachment root: {resolved}"
+        )
+    return resolved
+
+
 def _write_attachment(dest_dir: Path, filename: str, payload: bytes) -> Path:
     """Write one attachment owner-only, refusing to escape the download root.
 
-    ``sanitize_filename`` already guarantees a bare basename; this re-checks the
-    resolved path against the root anyway, because a containment bug here is a
-    whole-filesystem bug. ``O_NOFOLLOW`` stops a pre-planted symlink at the
-    destination from redirecting the write.
+    ``O_NOFOLLOW`` stops a pre-planted symlink at the destination from
+    redirecting the write.
     """
-    root = config.attachments_dir().resolve()
-    path = (dest_dir / filename).resolve()
-    if not path.is_relative_to(root):
-        raise ValueError(
-            f"Refusing to write outside the attachment root: {path}"
-        )
+    path = _inside_root(dest_dir / filename)
     dest_dir.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
     fd = os.open(path, flags, 0o600)
@@ -900,8 +909,11 @@ def _scan(paths: list[Path]) -> tuple[str, str]:
     try:
         proc = subprocess.run(
             [*cmd, *map(str, paths)],
+            # stdin is the MCP JSON-RPC stream; the scanner must never read it.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=_SCAN_TIMEOUT_S,
             check=False,
         )
@@ -913,6 +925,28 @@ def _scan(paths: list[Path]) -> tuple[str, str]:
     if proc.returncode == 1:
         return "threat", output
     return "error", f"exit {proc.returncode}: {output}"
+
+
+def _scan_each(paths: list[Path]) -> list[tuple[str, str]]:
+    """One verdict per path, in order.
+
+    One scanner run covers the batch. Only if it finds a threat are the files
+    rescanned one at a time, so a single bad file does not hold clean ones.
+    """
+    verdict = _scan(paths)
+    if verdict[0] != "threat" or len(paths) == 1:
+        return [verdict] * len(paths)
+    return [_scan([path]) for path in paths]
+
+
+_HELD_REASON = {
+    "threat": "the virus scan found a threat",
+    "error": "the virus scan failed ({detail})",
+    "unscanned": (
+        "NOT scanned: no virus scanner is configured (install ClamAV, or "
+        "check GMAIL_MCP_SCAN_CMD)"
+    ),
+}
 
 
 def _select_attachments(
@@ -988,42 +1022,38 @@ def _do_download_attachments(args: dict) -> str:
             (ordinal, path, f"({att.mime_type}, {len(payload)} bytes){note}")
         )
 
+    verdicts = _scan_each([path for _, path, _ in written]) if written else []
+    clean = [w for w, (v, _) in zip(written, verdicts, strict=True) if v == "clean"]
+    held = [(w, v, d) for w, (v, d) in zip(written, verdicts, strict=True) if v != "clean"]
+
     lines: list[str] = []
-    if written:
-        scan, detail = _scan([path for _, path, _ in written])
-        if scan == "clean":
-            dest_dir = config.attachments_dir() / message_id
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            released = []
-            for ordinal, path, info in written:
-                target = dest_dir / path.name
-                # rename(2) replaces a symlink planted at target, never follows it.
-                os.replace(path, target)
-                released.append((ordinal, target, info))
-            written = released
-            lines.append(
-                f"Saved {len(written)} of {len(selected)} attachment(s) from "
-                f"message {message_id} (virus scan: clean):"
-            )
-        else:
-            why = {
-                "threat": "the virus scan found a threat. Do not open them",
-                "error": f"the virus scan failed ({detail})",
-                "unscanned": (
-                    "they were NOT scanned, because no virus scanner is "
-                    "installed (install ClamAV or set GMAIL_MCP_SCAN_CMD)"
-                ),
-            }[scan]
-            lines.append(
-                f"Held {len(written)} attachment(s) from message {message_id} "
-                f"in quarantine, NOT released: {why}."
-            )
-        lines.extend(
-            f"  #{ordinal}  {path} {info}" for ordinal, path, info in written
+    if clean:
+        dest_dir = config.attachments_dir() / message_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        lines.append(
+            f"Saved {len(clean)} of {len(selected)} attachment(s) from "
+            f"message {message_id} (virus scan: clean):"
         )
-        if scan == "threat" and detail:
+        for ordinal, path, info in clean:
+            target = dest_dir / path.name
+            _inside_root(target)
+            # rename(2) replaces a symlink planted at target, never follows it.
+            os.replace(path, target)
+            lines.append(f"  #{ordinal}  {target} {info}")
+        with contextlib.suppress(OSError):
+            held_dir.rmdir()  # succeeds only once nothing is held there
+    if held:
+        lines.append(
+            f"Held {len(held)} attachment(s) from message {message_id} in "
+            "quarantine, NOT released. Do not open them:"
+        )
+        for (ordinal, path, info), scan, detail in held:
+            reason = _HELD_REASON[scan].format(detail=detail)
+            lines.append(f"  #{ordinal}  {path} {info}: {reason}")
+        found = [d for _, v, d in held if v == "threat" and d]
+        if found:
             lines.append("Scanner output:")
-            lines.extend(f"  {line}" for line in detail.splitlines())
+            lines.extend(f"  {line}" for d in found for line in d.splitlines())
     if refused:
         lines.append(f"Refused {len(refused)} attachment(s):")
         lines.extend(refused)

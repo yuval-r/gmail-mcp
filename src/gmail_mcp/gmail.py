@@ -82,7 +82,9 @@ def credentials_for(account: Account) -> Credentials:
 # discovery_cache and reads that JSON from disk on EVERY call, so when a uvx
 # cache prune deletes the install under a running server, every later tool
 # call fails. Read it once at startup and build clients from memory instead.
-_GMAIL_DISCOVERY_DOC = json.loads(discovery_cache.get_static_doc("gmail", "v1"))
+# Kept as a string: build_from_document mutates the dict it is given, so each
+# build parses its own copy and concurrent builds never share one.
+_GMAIL_DISCOVERY_DOC: str = discovery_cache.get_static_doc("gmail", "v1")
 
 
 def gmail_client(creds: Any) -> Any:

@@ -952,6 +952,48 @@ def test_download_without_scanner_stays_in_quarantine(fake_service, downloads, m
     assert "NOT released" in out
 
 
+def test_download_threat_holds_only_the_bad_file(fake_service, downloads, monkeypatch):
+    # One scanner run covers the batch; a hit must not hold the clean files.
+    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
+        _part("clean.pdf", "application/pdf", "att-1"),
+        _part("bad.pdf", "application/pdf", "att-2"),
+    ]))
+    monkeypatch.setattr(FakeAttachments, "payloads", {
+        "att-1": _b64url_bytes(b"ok"), "att-2": _b64url_bytes(b"EICAR"),
+    })
+    code = (
+        "import sys, pathlib\n"
+        "bad = [a for a in sys.argv[1:] if pathlib.Path(a).read_bytes() == b'EICAR']\n"
+        "for a in bad: print(a + ': Eicar-Test-Signature FOUND')\n"
+        "sys.exit(1 if bad else 0)\n"
+    )
+    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
+    out = _download()
+    assert (downloads / MID / "01-clean.pdf").read_bytes() == b"ok"
+    assert (downloads / "quarantine" / MID / "02-bad.pdf").exists()
+    assert not (downloads / MID / "02-bad.pdf").exists()
+    assert "Eicar-Test-Signature FOUND" in out
+    assert "NOT released" in out
+
+
+def test_download_refuses_symlinked_message_dir(fake_service, downloads, monkeypatch, tmp_path):
+    # A symlink planted at the release dir must not carry the file out of the root.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    downloads.mkdir(parents=True)
+    (downloads / MID).symlink_to(outside)
+    _one_pdf(monkeypatch)
+    with pytest.raises(ValueError, match="outside the attachment root"):
+        _download()
+    assert not any(outside.iterdir())
+
+
+def test_download_clean_release_removes_empty_quarantine_dir(fake_service, downloads, monkeypatch):
+    _one_pdf(monkeypatch)
+    _download()
+    assert not (downloads / "quarantine" / MID).exists()
+
+
 def test_download_rejects_reserved_quarantine_id(fake_service, downloads):
     # The quarantine dir shares the root with per-message dirs, so a message
     # id must never be able to name it. Gmail ids are hex; "quarantine" is not.

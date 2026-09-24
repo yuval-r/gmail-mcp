@@ -28,7 +28,7 @@ tests/        — pytest; Gmail client is mocked, no live network
 | `auth.py` | `add` / `list` / `remove` subcommands. `add` runs `InstalledAppFlow.run_local_server`, reads the granted email from `users.getProfile`, upserts into the store. |
 | `store.py` | `TokenStore` CRUD over `sqlite3`. `upsert` preserves `added_at`; `touch` stamps `last_used_at`; `update_token` persists refreshed access tokens. |
 | `gmail.py` | `build_service(account, store)` builds google-auth `Credentials`, refreshes if stale, persists the new token, returns a Gmail client. Plus pure helpers — `parse_message`, `extract_body_and_attachments`, `strip_html`, `resolve_label_ids`, `build_mime_message`, `sanitize_filename`, `screen_attachment`, `decode_b64url_bytes`, formatters. |
-| `config.py` | `db_path()`, `client_secret_path()`, `attachments_dir()`, `max_attachment_bytes()`, `SCOPES`. |
+| `config.py` | `db_path()`, `client_secret_path()`, `attachments_dir()`, `quarantine_dir()`, `scan_command()`, `max_attachment_bytes()`, `SCOPES`. |
 
 ## OAuth model
 
@@ -112,9 +112,11 @@ tests/        — pytest; Gmail client is mocked, no live network
   blocks. The scan is a separate local step: files that pass the screen are
   written to `config.quarantine_dir()/<message_id>/` (under the attachment
   root) and `_scan` runs `config.scan_command()` (`GMAIL_MCP_SCAN_CMD`, else
-  ClamAV `clamscan`) over them. Only exit 0 releases them (`_release`) to
-  `<root>/<message_id>/`. Threat, scanner error, or no scanner means they stay
-  held. Never release without a clean scan. `_MESSAGE_ID_RE` is hex-only so no
+  ClamAV `clamscan`) over them (`_scan_each` rescans singly after a hit, so
+  one bad file does not hold clean ones). Only exit 0 releases a file, by
+  rename into `<root>/<message_id>/` after an `_inside_root` check. Threat,
+  scanner error, or no scanner means it stays held; nothing purges held files.
+  Never release without a clean scan. `_MESSAGE_ID_RE` is hex-only so no
   message id can name the `quarantine` dir.
 - **Attachments are addressed by `#N`, not by attachment id.** `_parsed_body`
   numbers them and deliberately omits the raw `attachmentId`; the download tool
