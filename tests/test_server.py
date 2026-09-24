@@ -32,6 +32,7 @@ def _b64url(text: str) -> str:
 
 # --- account validation -----------------------------------------------------
 
+
 def test_require_account_unknown_lists_available(store):
     store.upsert("known@example.com", "r")
     with pytest.raises(ValueError) as exc:
@@ -54,6 +55,7 @@ def test_require_account_ok(store):
 
 
 # --- list_accounts dispatch -------------------------------------------------
+
 
 def test_list_accounts_empty(store):
     out = server._dispatch("list_accounts", {})
@@ -474,6 +476,7 @@ def test_search_all_accounts_none(store):
 
 # --- filters ----------------------------------------------------------------
 
+
 def test_list_filters_dispatch(fake_service):
     out = server._dispatch("list_filters", {"account": "a@example.com"})
     assert "filt_1" in out
@@ -640,6 +643,7 @@ def test_create_draft_schema_exposes_thread_id_and_from_addr():
 
 
 # --- download_attachments ---------------------------------------------------
+
 
 def _b64url_bytes(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii")
@@ -817,6 +821,7 @@ def test_download_rejects_non_hex_message_id(fake_service, downloads, bad_id):
             "account": "a@example.com", "message_id": bad_id,
         })
 
+
 def test_download_reports_gmail_error_per_attachment(
     fake_service, downloads, monkeypatch
 ):
@@ -850,6 +855,7 @@ def test_download_tool_is_registered():
 
 
 # --- quarantine + virus scan -----------------------------------------------
+
 
 def _scanner(exit_code: int, stdout: str = "", argv_log=None) -> list[str]:
     """A stand-in scanner: logs its file args, prints stdout, exits exit_code."""
@@ -973,6 +979,7 @@ def test_download_threat_holds_only_the_bad_file(fake_service, downloads, monkey
     assert "Eicar-Test-Signature FOUND" in out
     assert "NOT released" in out
 
+
 def test_download_scan_error_holds_only_that_file(fake_service, downloads, monkeypatch):
     _two_pdfs(monkeypatch, b"ok", b"LOCKED")
     monkeypatch.setattr(server.config, "scan_command", lambda: _per_file_scanner(
@@ -984,6 +991,7 @@ def test_download_scan_error_holds_only_that_file(fake_service, downloads, monke
     assert "scan failed" in out
     # Scanner output is printed once, in its own section, not per file line.
     assert out.count("Can not open file ERROR") == 1
+
 
 def test_download_replaces_symlink_at_target_name(fake_service, downloads, monkeypatch, tmp_path):
     # rename(2) replaces a planted link; it must neither follow it nor abort.
@@ -1134,6 +1142,8 @@ def test_download_clean_release_removes_empty_quarantine_dir(fake_service, downl
     _download()
     assert not (downloads / "quarantine" / MID).exists()
 
+
+# --- update / delete drafts -------------------------------------------------
 
 def test_update_draft_replaces_message_in_place(fake_service):
     out = server._dispatch(
