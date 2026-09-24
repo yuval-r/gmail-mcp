@@ -71,7 +71,8 @@ def _free_port(port: int) -> None:
 def _add() -> int:
     """Run the installed-app OAuth flow and store the resulting account."""
     from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
+
+    from gmail_mcp.gmail import gmail_client
 
     secret = client_secret_path()
     if not secret.exists():
@@ -127,7 +128,7 @@ def _add() -> int:
         )
         return 1
 
-    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    service = gmail_client(creds)
     profile = service.users().getProfile(userId="me").execute()
     email = profile["emailAddress"]
 

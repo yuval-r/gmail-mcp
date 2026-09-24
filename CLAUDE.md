@@ -145,10 +145,12 @@ tests/        — pytest; Gmail client is mocked, no live network
   (`gmail.status_tag`: DRAFT, SENT, INBOX, UNREAD, SPAM, TRASH) after each id in
   the trusted manifest, never inside the fence. Drafts otherwise look exactly
   like sent mail. `_summarize_message` must keep returning `labelIds`.
-- **Discovery doc is loaded once.** `gmail._GMAIL_DISCOVERY_DOC` is read at
-  import and clients use `build_from_document`. Plain `build()` re-reads the
-  JSON from the install dir on every call, which broke a running server when a
-  uv cache clean deleted its uvx env.
+- **Run from a stable install, not a uvx cache env.** A `uv cache clean` can
+  delete a uvx env under a running server; later lazy reads from the install
+  dir then fail. `gmail._GMAIL_DISCOVERY_DOC` (read once at import, clients via
+  `gmail_client` / `build_from_document`) removes the most frequent one, the
+  per-call discovery JSON read, but TLS still loads its CA bundle from the
+  install dir. Only `uv tool install` actually prevents this.
 - **Label resolution does not create labels.** `resolve_label_ids` matches
   existing ids/names (case-insensitive) and raises listing available names.
 

@@ -159,6 +159,8 @@ _ACCOUNT_PROP = {
     "description": "Email address of the authorized Gmail account to act on.",
 }
 
+_DRAFT_ID_PROP = {"type": "string", "description": "Draft id."}
+
 _DRAFT_PROPS = {
     "account": _ACCOUNT_PROP,
     "to": {"type": "string"},
@@ -345,7 +347,7 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     **_DRAFT_PROPS,
-                    "draft_id": {"type": "string", "description": "Draft id."},
+                    "draft_id": _DRAFT_ID_PROP,
                 },
                 "required": ["account", "draft_id", "to", "subject", "body"],
             },
@@ -360,7 +362,7 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
-                    "draft_id": {"type": "string", "description": "Draft id."},
+                    "draft_id": _DRAFT_ID_PROP,
                 },
                 "required": ["account", "draft_id"],
             },
@@ -842,8 +844,8 @@ def _reply_headers(service: Any, thread_id: str) -> tuple[str | None, str | None
 # quarantine dir that shares the root.
 _MESSAGE_ID_RE = re.compile(r"[0-9a-fA-F]+")
 
-# clamscan loads its whole signature database on every run, which takes tens
-# of seconds on its own.
+# clamscan loads its whole signature database on every run (a few seconds on
+# an Apple-silicon Mac); the ceiling covers slow disks and large archives.
 _SCAN_TIMEOUT_S = 300
 _SCAN_OUTPUT_CHARS = 2000
 
@@ -911,15 +913,6 @@ def _scan(paths: list[Path]) -> tuple[str, str]:
     if proc.returncode == 1:
         return "threat", output
     return "error", f"exit {proc.returncode}: {output}"
-
-
-def _release(held: Path, dest_dir: Path) -> Path:
-    """Move a scanned-clean file out of quarantine into its message dir."""
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    target = dest_dir / held.name
-    # rename(2) replaces a symlink planted at the target; it does not follow it.
-    os.replace(held, target)
-    return target
 
 
 def _select_attachments(
@@ -1000,13 +993,17 @@ def _do_download_attachments(args: dict) -> str:
         scan, detail = _scan([path for _, path, _ in written])
         if scan == "clean":
             dest_dir = config.attachments_dir() / message_id
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            released = []
+            for ordinal, path, info in written:
+                target = dest_dir / path.name
+                # rename(2) replaces a symlink planted at target, never follows it.
+                os.replace(path, target)
+                released.append((ordinal, target, info))
+            written = released
             lines.append(
                 f"Saved {len(written)} of {len(selected)} attachment(s) from "
                 f"message {message_id} (virus scan: clean):"
-            )
-            lines.extend(
-                f"  #{ordinal}  {_release(path, dest_dir)} {info}"
-                for ordinal, path, info in written
             )
         else:
             why = {
@@ -1021,12 +1018,12 @@ def _do_download_attachments(args: dict) -> str:
                 f"Held {len(written)} attachment(s) from message {message_id} "
                 f"in quarantine, NOT released: {why}."
             )
-            lines.extend(
-                f"  #{ordinal}  {path} {info}" for ordinal, path, info in written
-            )
-            if scan == "threat" and detail:
-                lines.append("Scanner output:")
-                lines.extend(f"  {line}" for line in detail.splitlines())
+        lines.extend(
+            f"  #{ordinal}  {path} {info}" for ordinal, path, info in written
+        )
+        if scan == "threat" and detail:
+            lines.append("Scanner output:")
+            lines.extend(f"  {line}" for line in detail.splitlines())
     if refused:
         lines.append(f"Refused {len(refused)} attachment(s):")
         lines.extend(refused)

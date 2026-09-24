@@ -14,6 +14,7 @@ import pytest
 from googleapiclient.errors import HttpError
 
 import gmail_mcp.server as server
+from gmail_mcp.gmail import _UNTRUSTED_CLOSE
 from gmail_mcp.store import TokenStore
 
 
@@ -310,7 +311,7 @@ def test_search_messages_pages(fake_service, monkeypatch):
     )
     assert fake_service.recorder["list"]["pageToken"] == "tok1"
     # The next token is API output, so it sits after the fence, not inside it.
-    _, _, tail = out.partition("⟦END UNTRUSTED EMAIL CONTENT⟧")
+    _, _, tail = out.partition(_UNTRUSTED_CLOSE)
     assert 'page_token="tok2"' in tail
 
 
@@ -549,12 +550,12 @@ BASE_DRAFT = {
 }
 
 
-def _draft_message(fake_service) -> dict:
-    return fake_service.recorder["draft_create"]["body"]["message"]
+def _draft_message(fake_service, key="draft_create") -> dict:
+    return fake_service.recorder[key]["body"]["message"]
 
 
-def _draft_mime(fake_service) -> str:
-    raw = _draft_message(fake_service)["raw"]
+def _draft_mime(fake_service, key="draft_create") -> str:
+    raw = _draft_message(fake_service, key)["raw"]
     return base64.urlsafe_b64decode(raw).decode("utf-8")
 
 
@@ -962,11 +963,6 @@ def test_download_rejects_reserved_quarantine_id(fake_service, downloads):
 
 # --- update / delete drafts -------------------------------------------------
 
-def _updated_mime(fake_service) -> str:
-    raw = fake_service.recorder["draft_update"]["body"]["message"]["raw"]
-    return base64.urlsafe_b64decode(raw).decode("utf-8")
-
-
 def test_update_draft_replaces_message_in_place(fake_service):
     out = server._dispatch(
         "update_draft", {**BASE_DRAFT, "draft_id": "r1", "subject": "Fixed subject"}
@@ -975,7 +971,7 @@ def test_update_draft_replaces_message_in_place(fake_service):
     call = fake_service.recorder["draft_update"]
     assert call["id"] == "r1"
     assert call["body"]["id"] == "r1"
-    mime = _updated_mime(fake_service)
+    mime = _draft_mime(fake_service, "draft_update")
     assert "Subject: Fixed subject" in mime
     assert "From: a@example.com" in mime
 
@@ -984,13 +980,13 @@ def test_update_draft_keeps_existing_thread_by_default(fake_service):
     # Without thread_id, the draft stays in the thread it already sits in, and
     # still carries reply headers for the newest real message there.
     server._dispatch("update_draft", {**BASE_DRAFT, "draft_id": "r1"})
-    assert fake_service.recorder["draft_update"]["body"]["message"]["threadId"] == "t1"
-    assert "In-Reply-To: <second@x.com>" in _updated_mime(fake_service)
+    assert _draft_message(fake_service, "draft_update")["threadId"] == "t1"
+    assert "In-Reply-To: <second@x.com>" in _draft_mime(fake_service, "draft_update")
 
 
 def test_update_draft_explicit_thread_wins(fake_service):
     server._dispatch("update_draft", {**BASE_DRAFT, "draft_id": "r1", "thread_id": "t7"})
-    assert fake_service.recorder["draft_update"]["body"]["message"]["threadId"] == "t7"
+    assert _draft_message(fake_service, "draft_update")["threadId"] == "t7"
     assert "draft_get" not in fake_service.recorder
 
 

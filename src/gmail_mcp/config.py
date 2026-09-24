@@ -116,8 +116,7 @@ def quarantine_dir() -> Path:
     """Where downloads are written before a virus scan releases them.
 
     Lives under the attachment root, so the one-root containment check still
-    covers it. Message ids are hex, so no per-message directory can collide
-    with the name ``quarantine``.
+    covers it. See ``server._MESSAGE_ID_RE`` for why no message dir collides.
     """
     return attachments_dir() / "quarantine"
 
