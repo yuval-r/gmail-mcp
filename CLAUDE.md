@@ -39,7 +39,8 @@ tests/        — pytest; Gmail client is mocked, no live network
   JSON at `~/.gmail-mcp/client_secret.json` (env `GMAIL_MCP_CLIENT_SECRET`).
   Never hardcode `client_id`/`client_secret`.
 - **Token store**: SQLite at `~/.gmail-mcp/tokens.db` (env `GMAIL_MCP_DB`).
-  Keyed by email. Holds refresh_token + last access-token blob + scopes.
+  Keyed by email. `TokenStore` makes the DB `0o600` and a new parent dir
+  `0o700`, since it holds refresh tokens. Holds refresh_token + last access-token blob + scopes.
 - **Refresh**: google-auth's `Request` transport refreshes the access token
   on demand; `build_service` persists the refreshed blob back to the DB.
 - **Scopes** (one constant, `config.SCOPES`): `gmail.readonly`,
@@ -118,7 +119,12 @@ tests/        — pytest; Gmail client is mocked, no live network
   `<root>/<message_id>/` after an `_inside_root` check on that dir. Threat,
   scanner error, a scanner that cannot run, no scanner, or a failed rename
   means it stays held, reported per `#N`; nothing purges held files.
-  Never release without a clean scan. `_MESSAGE_ID_RE` is hex-only so no
+  Never release without a clean scan. The default argv carries
+  `--alert-exceeds-max`: without it clamscan prints `OK` for content it
+  skipped at a limit (e.g. EICAR nested 20 zips deep). `_DOWNLOAD_LOCK`
+  serializes downloads so two calls never share quarantine files mid-scan.
+  The download result omits the MIME type: it is sender-chosen and that
+  output is trusted text. `_MESSAGE_ID_RE` is hex-only so no
   message id can name the `quarantine` dir.
 - **Attachments are addressed by `#N`, not by attachment id.** `_parsed_body`
   numbers them and deliberately omits the raw `attachmentId`; the download tool

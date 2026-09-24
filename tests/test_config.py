@@ -21,6 +21,9 @@ def test_scan_command_detects_clamscan(monkeypatch):
     cmd = config.scan_command()
     assert cmd is not None
     assert cmd[0] == "/bin/clamscan"
+    # Content ClamAV skips at a limit (deep nesting, huge archives) must be
+    # reported, not printed as OK.
+    assert "--alert-exceeds-max" in cmd
 
 
 def test_scan_command_none_when_no_scanner(monkeypatch):

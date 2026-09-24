@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -852,6 +853,11 @@ _MESSAGE_ID_RE = re.compile(r"[0-9a-fA-F]+")
 _SCAN_TIMEOUT_S = 300
 _SCAN_OUTPUT_CHARS = 500
 
+# Downloads share quarantine paths per message, so two calls for the same
+# message (a client retry during a slow scan) must not interleave: one could
+# rewrite a file after the other scanned it. Downloads are rare; one lock.
+_DOWNLOAD_LOCK = threading.Lock()
+
 
 def _attachment_bytes(service: Any, message_id: str, att: Attachment) -> bytes:
     """Return an attachment's raw bytes, inline or fetched by reference."""
@@ -945,7 +951,7 @@ def _scan_files(paths: list[Path]) -> list[tuple[str, str]]:
                 ("clean", "") if proc.returncode == 0
                 else ("error", f"exit {proc.returncode}: {tail}")
             )
-        elif line.endswith(" OK"):
+        elif line.endswith((" OK", ": Empty file")):
             verdicts.append(("clean", ""))
         elif line.endswith(" FOUND"):
             verdicts.append(("threat", line))
@@ -987,6 +993,11 @@ def _select_attachments(
 
 
 def _do_download_attachments(args: dict) -> str:
+    with _DOWNLOAD_LOCK:
+        return _download_attachments(args)
+
+
+def _download_attachments(args: dict) -> str:
     message_id = args["message_id"]
     if not _MESSAGE_ID_RE.fullmatch(message_id):
         raise ValueError(
@@ -1043,7 +1054,8 @@ def _do_download_attachments(args: dict) -> str:
             continue
         note = f"  [{verdict.warning}]" if verdict.warning else ""
         written.append(
-            (ordinal, path, f"({att.mime_type}, {len(payload)} bytes){note}")
+            # No MIME type: the sender picks it, and this line is trusted text.
+            (ordinal, path, f"({len(payload)} bytes){note}")
         )
 
     clean: list[tuple[int, Path, str]] = []

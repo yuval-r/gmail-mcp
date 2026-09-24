@@ -144,7 +144,9 @@ def scan_command() -> list[str] | None:
     if found is None:
         return None
     # No --infected: the "<path>: OK" lines are how clean files are told apart.
-    return [found, "--no-summary", "--stdout"]
+    # --alert-exceeds-max: content skipped at a scan limit (deep nesting, huge
+    # archives) is reported as FOUND, never printed as OK.
+    return [found, "--no-summary", "--stdout", "--alert-exceeds-max"]
 
 
 def max_attachment_bytes() -> int:

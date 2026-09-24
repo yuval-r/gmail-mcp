@@ -18,6 +18,22 @@ def test_creates_db_and_dir(tmp_path):
     assert db.exists()
 
 
+def test_db_and_dir_are_owner_only(tmp_path):
+    # The DB holds refresh tokens; nobody else on the machine may read it.
+    db = tmp_path / "store" / "tokens.db"
+    TokenStore(path=db)
+    assert db.stat().st_mode & 0o777 == 0o600
+    assert db.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_existing_db_is_tightened(tmp_path):
+    db = tmp_path / "tokens.db"
+    TokenStore(path=db)
+    db.chmod(0o644)
+    TokenStore(path=db)
+    assert db.stat().st_mode & 0o777 == 0o600
+
+
 def test_empty_list(store):
     assert store.list_accounts() == []
     assert store.get("nobody@example.com") is None

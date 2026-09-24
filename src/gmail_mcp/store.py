@@ -19,6 +19,7 @@ Schema::
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,8 +49,10 @@ class TokenStore:
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or db_path()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._init_db()
+        # Refresh tokens live here: owner-only, even for a DB made before this.
+        os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
