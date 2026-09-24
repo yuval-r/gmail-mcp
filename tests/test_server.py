@@ -976,6 +976,81 @@ def test_download_threat_holds_only_the_bad_file(fake_service, downloads, monkey
     assert "NOT released" in out
 
 
+def test_download_batch_error_rescans_so_clean_files_release(
+    fake_service, downloads, monkeypatch
+):
+    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
+        _part("clean.pdf", "application/pdf", "att-1"),
+        _part("locked.pdf", "application/pdf", "att-2"),
+    ]))
+    monkeypatch.setattr(FakeAttachments, "payloads", {
+        "att-1": _b64url_bytes(b"ok"), "att-2": _b64url_bytes(b"LOCKED"),
+    })
+    code = (
+        "import sys, pathlib\n"
+        "bad = [a for a in sys.argv[1:] if pathlib.Path(a).read_bytes() == b'LOCKED']\n"
+        "for a in bad: print(a + ': Can not open file ERROR')\n"
+        "sys.exit(2 if bad else 0)\n"
+    )
+    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
+    out = _download()
+    assert (downloads / MID / "01-clean.pdf").exists()
+    assert (downloads / "quarantine" / MID / "02-locked.pdf").exists()
+    assert "scan failed" in out
+    # Scanner output is printed once, in its own section, not per file line.
+    assert out.count("Can not open file ERROR") == 1
+
+
+def test_download_batch_threat_no_rescan_confirms_holds_all(
+    fake_service, downloads, monkeypatch
+):
+    # The batch run flags a threat that no single-file run reproduces: nothing
+    # may be released on the strength of the single runs alone.
+    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
+        _part("a.pdf", "application/pdf", "att-1"),
+        _part("b.pdf", "application/pdf", "att-2"),
+    ]))
+    monkeypatch.setattr(FakeAttachments, "payloads", {
+        "att-1": _b64url_bytes(b"a"), "att-2": _b64url_bytes(b"b"),
+    })
+    code = "import sys\nprint('combo FOUND')\nsys.exit(1 if len(sys.argv) > 2 else 0)\n"
+    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
+    out = _download()
+    assert not (downloads / MID).exists()
+    assert "NOT released" in out
+
+
+def test_download_replaces_symlink_at_target_name(fake_service, downloads, monkeypatch, tmp_path):
+    # rename(2) replaces a planted link; it must neither follow it nor abort.
+    decoy = tmp_path / "decoy"
+    decoy.write_bytes(b"untouched")
+    (downloads / MID).mkdir(parents=True)
+    (downloads / MID / "01-invoice.pdf").symlink_to(decoy)
+    _one_pdf(monkeypatch)
+    _download()
+    released = downloads / MID / "01-invoice.pdf"
+    assert not released.is_symlink()
+    assert released.read_bytes() == PDF_BYTES
+    assert decoy.read_bytes() == b"untouched"
+
+
+def test_download_release_failure_is_reported_not_raised(
+    fake_service, downloads, monkeypatch
+):
+    _one_pdf(monkeypatch)
+    real_replace = server.os.replace
+
+    def failing_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(server.os, "replace", failing_replace)
+    out = _download()
+    monkeypatch.setattr(server.os, "replace", real_replace)
+    assert (downloads / "quarantine" / MID / "01-invoice.pdf").exists()
+    assert "NOT released" in out
+    assert "disk full" in out
+
+
 def test_download_refuses_symlinked_message_dir(fake_service, downloads, monkeypatch, tmp_path):
     # A symlink planted at the release dir must not carry the file out of the root.
     outside = tmp_path / "outside"

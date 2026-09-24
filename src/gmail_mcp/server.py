@@ -930,18 +930,22 @@ def _scan(paths: list[Path]) -> tuple[str, str]:
 def _scan_each(paths: list[Path]) -> list[tuple[str, str]]:
     """One verdict per path, in order.
 
-    One scanner run covers the batch. Only if it finds a threat are the files
+    One scanner run covers the batch. Only if it is not clean are the files
     rescanned one at a time, so a single bad file does not hold clean ones.
     """
-    verdict = _scan(paths)
-    if verdict[0] != "threat" or len(paths) == 1:
-        return [verdict] * len(paths)
-    return [_scan([path]) for path in paths]
+    batch = _scan(paths)
+    if batch[0] in ("clean", "unscanned") or len(paths) == 1:
+        return [batch] * len(paths)
+    singles = [_scan([path]) for path in paths]
+    if batch[0] == "threat" and all(v != "threat" for v, _ in singles):
+        # No single run can place the batch's threat, so trust none of them.
+        return [batch] * len(paths)
+    return singles
 
 
 _HELD_REASON = {
     "threat": "the virus scan found a threat",
-    "error": "the virus scan failed ({detail})",
+    "error": "the virus scan failed",
     "unscanned": (
         "NOT scanned: no virus scanner is configured (install ClamAV, or "
         "check GMAIL_MCP_SCAN_CMD)"
@@ -1026,34 +1030,44 @@ def _do_download_attachments(args: dict) -> str:
     clean = [w for w, (v, _) in zip(written, verdicts, strict=True) if v == "clean"]
     held = [(w, v, d) for w, (v, d) in zip(written, verdicts, strict=True) if v != "clean"]
 
-    lines: list[str] = []
+    released: list[str] = []
     if clean:
         dest_dir = config.attachments_dir() / message_id
         dest_dir.mkdir(parents=True, exist_ok=True)
-        lines.append(
-            f"Saved {len(clean)} of {len(selected)} attachment(s) from "
-            f"message {message_id} (virus scan: clean):"
-        )
+        # A symlinked message dir must not carry files out of the root.
+        _inside_root(dest_dir)
         for ordinal, path, info in clean:
             target = dest_dir / path.name
-            _inside_root(target)
-            # rename(2) replaces a symlink planted at target, never follows it.
-            os.replace(path, target)
-            lines.append(f"  #{ordinal}  {target} {info}")
+            try:
+                # rename(2) replaces a symlink planted at target, never follows it.
+                os.replace(path, target)
+            except OSError as e:
+                held.append(((ordinal, path, info), "error", str(e)))
+                continue
+            released.append(f"  #{ordinal}  {target} {info}")
         with contextlib.suppress(OSError):
             held_dir.rmdir()  # succeeds only once nothing is held there
+
+    lines: list[str] = []
+    if released:
+        lines.append(
+            f"Saved {len(released)} of {len(selected)} attachment(s) from "
+            f"message {message_id} (virus scan: clean):"
+        )
+        lines.extend(released)
     if held:
         lines.append(
             f"Held {len(held)} attachment(s) from message {message_id} in "
             "quarantine, NOT released. Do not open them:"
         )
-        for (ordinal, path, info), scan, detail in held:
-            reason = _HELD_REASON[scan].format(detail=detail)
-            lines.append(f"  #{ordinal}  {path} {info}: {reason}")
-        found = [d for _, v, d in held if v == "threat" and d]
-        if found:
-            lines.append("Scanner output:")
-            lines.extend(f"  {line}" for d in found for line in d.splitlines())
+        lines.extend(
+            f"  #{ordinal}  {path} {info}: {_HELD_REASON[scan]}"
+            for (ordinal, path, info), scan, _ in held
+        )
+        output = list(dict.fromkeys(d for _, _, d in held if d))
+        if output:
+            lines.append("Details:")
+            lines.extend(f"  {line}" for d in output for line in d.splitlines())
     if refused:
         lines.append(f"Refused {len(refused)} attachment(s):")
         lines.extend(refused)

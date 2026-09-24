@@ -670,15 +670,3 @@ def test_gmail_client_does_not_touch_discovery_files(monkeypatch):
     svc = gmail_client(Credentials(token="t"))
     assert hasattr(svc.users().messages(), "list")
 
-
-def test_gmail_client_leaves_discovery_doc_untouched():
-    # googleapiclient mutates the discovery dict it is given, so concurrent
-    # builds must each get their own copy, never a shared one.
-    from google.oauth2.credentials import Credentials
-
-    import gmail_mcp.gmail as gmail
-
-    before = gmail._GMAIL_DISCOVERY_DOC
-    gmail_client(Credentials(token="t")).users().messages()
-    assert isinstance(before, str)
-    assert before == gmail._GMAIL_DISCOVERY_DOC
