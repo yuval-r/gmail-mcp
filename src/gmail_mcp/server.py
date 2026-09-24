@@ -19,6 +19,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +88,7 @@ def _service_for(email: str) -> Any:
     return build_service(acct, get_store())
 
 
-def _resolve_body_cap(args: dict) -> int | None:
+def _resolve_body_cap(args: dict[str, Any]) -> int | None:
     """Resolve the per-request body cap: explicit arg wins, else config default.
 
     Returns ``None`` (unlimited) when the resolved value is <= 0, so a caller
@@ -222,7 +223,7 @@ _UNTRUSTED_NOTICE = (
 )
 
 
-@app.list_tools()
+@app.list_tools()  # type: ignore[untyped-decorator,no-untyped-call]
 async def list_tools() -> list[Tool]:
     return [
         Tool(
@@ -695,8 +696,8 @@ async def list_tools() -> list[Tool]:
 # Dispatch
 # ---------------------------------------------------------------------------
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+@app.call_tool()  # type: ignore[untyped-decorator]
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     try:
         text = await asyncio.to_thread(_dispatch, name, arguments)
         return [TextContent(type="text", text=text)]
@@ -713,7 +714,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Unexpected error: {e}")]
 
 
-def _dispatch(name: str, args: dict) -> str:
+def _dispatch(name: str, args: dict[str, Any]) -> str:
     match name:
         case "list_accounts":
             return _do_list_accounts()
@@ -767,7 +768,7 @@ def _do_list_accounts() -> str:
     return "\n".join(lines)
 
 
-def _do_search(args: dict) -> str:
+def _do_search(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     results, next_token = _search(
         service, args["query"], args.get("max_results", 20), args.get("page_token")
@@ -781,7 +782,7 @@ def _do_search(args: dict) -> str:
     return out
 
 
-def _do_read_message(args: dict) -> str:
+def _do_read_message(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     resource = (
         service.users()
@@ -792,7 +793,7 @@ def _do_read_message(args: dict) -> str:
     return format_parsed_message(parse_message(resource), _resolve_body_cap(args))
 
 
-def _do_read_thread(args: dict) -> str:
+def _do_read_thread(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     thread = (
         service.users()
@@ -1019,7 +1020,7 @@ def _purge_quarantine() -> None:
         logger.warning("Quarantine purge failed", exc_info=True)
 
 
-def _older(path: Path, cutoff: float, is_kind: Any) -> bool:
+def _older(path: Path, cutoff: float, is_kind: Callable[[int], bool]) -> bool:
     """True for a path of the given kind (never a symlink) last changed before cutoff."""
     st = path.lstat()
     return bool(is_kind(st.st_mode)) and st.st_mtime < cutoff
@@ -1044,7 +1045,7 @@ def _select_attachments(
     return [numbered[index - 1]]
 
 
-def _do_download_attachments(args: dict) -> str:
+def _do_download_attachments(args: dict[str, Any]) -> str:
     message_id = args["message_id"]
     if not _MESSAGE_ID_RE.fullmatch(message_id):
         raise ValueError(
@@ -1188,7 +1189,7 @@ def _do_download_attachments(args: dict) -> str:
 
 
 def _draft_message(
-    service: Any, args: dict, thread_id: str | None
+    service: Any, args: dict[str, Any], thread_id: str | None
 ) -> dict[str, Any]:
     """Build the Gmail message body shared by create_draft and update_draft."""
     in_reply_to, references = (
@@ -1211,7 +1212,7 @@ def _draft_message(
     return message
 
 
-def _do_create_draft(args: dict) -> str:
+def _do_create_draft(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     message = _draft_message(service, args, args.get("thread_id"))
     draft = (
@@ -1223,7 +1224,7 @@ def _do_create_draft(args: dict) -> str:
     return f"Created draft {draft.get('id')}."
 
 
-def _do_update_draft(args: dict) -> str:
+def _do_update_draft(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     draft_id = args["draft_id"]
     thread_id = args.get("thread_id")
@@ -1244,14 +1245,14 @@ def _do_update_draft(args: dict) -> str:
     return f"Updated draft {draft_id}."
 
 
-def _do_delete_draft(args: dict) -> str:
+def _do_delete_draft(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     draft_id = args["draft_id"]
     service.users().drafts().delete(userId="me", id=draft_id).execute()
     return f"Deleted draft {draft_id} permanently."
 
 
-def _do_list_drafts(args: dict) -> str:
+def _do_list_drafts(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     resp = (
         service.users()
@@ -1269,7 +1270,7 @@ def _do_list_drafts(args: dict) -> str:
     return "\n".join(lines)
 
 
-def _do_list_labels(args: dict) -> str:
+def _do_list_labels(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     resp = service.users().labels().list(userId="me").execute()
     labels = resp.get("labels", [])
@@ -1304,7 +1305,7 @@ def _all_message_ids(service: Any, query: str) -> list[str]:
             return ids
 
 
-def _resolve_selection(service: Any, args: dict) -> list[str]:
+def _resolve_selection(service: Any, args: dict[str, Any]) -> list[str]:
     """Resolve a tool's selection args (message_id | message_ids | query) to ids.
 
     De-dupes while preserving order. Raises ValueError if no selection is given,
@@ -1341,7 +1342,7 @@ def _batch_modify(
         ).execute()
 
 
-def _do_modify_labels(args: dict) -> str:
+def _do_modify_labels(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     add = args.get("add") or []
     remove = args.get("remove") or []
@@ -1360,7 +1361,7 @@ def _do_modify_labels(args: dict) -> str:
     return f"Updated labels on {len(ids)} message(s): {', '.join(parts)}."
 
 
-def _do_trash(args: dict) -> str:
+def _do_trash(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     ids = _resolve_selection(service, args)
     # Trash = add the TRASH system label (recoverable). Never batchDelete.
@@ -1384,7 +1385,7 @@ _ACTION_LABELS: dict[str, tuple[list[str], list[str]]] = {
 }
 
 
-def _do_bulk_action(args: dict) -> str:
+def _do_bulk_action(args: dict[str, Any]) -> str:
     action = args.get("action", "")
     mapping = _ACTION_LABELS.get(action)
     if mapping is None:
@@ -1397,7 +1398,7 @@ def _do_bulk_action(args: dict) -> str:
     return f"Applied '{action}' to {len(ids)} message(s) in {args['account']}."
 
 
-def _do_read_messages(args: dict) -> str:
+def _do_read_messages(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     cap = args.get("max_results", 25)
     ids: list[str] = list(args.get("message_ids") or [])
@@ -1425,7 +1426,7 @@ def _count_for(service: Any, query: str) -> int:
     return len(_all_message_ids(service, query))
 
 
-def _do_count_messages(args: dict) -> str:
+def _do_count_messages(args: dict[str, Any]) -> str:
     query = args["query"]
     if args.get("all_accounts"):
         accounts = get_store().list_accounts()
@@ -1449,7 +1450,7 @@ def _do_count_messages(args: dict) -> str:
     return f"{n} message(s) match '{query}' in {args['account']}."
 
 
-def _do_search_all(args: dict) -> str:
+def _do_search_all(args: dict[str, Any]) -> str:
     accounts = get_store().list_accounts()
     if not accounts:
         return "No accounts authorized yet. Run `gmail-mcp-auth add` to add one."
@@ -1499,7 +1500,7 @@ def _label_names(label_ids: list[str], by_id: dict[str, str]) -> str:
     return ", ".join(by_id.get(lid, lid) for lid in label_ids)
 
 
-def _do_list_filters(args: dict) -> str:
+def _do_list_filters(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     resp = service.users().settings().filters().list(userId="me").execute()
     filters = resp.get("filter", [])
@@ -1524,7 +1525,7 @@ def _do_list_filters(args: dict) -> str:
     return "\n".join(lines)
 
 
-def _do_create_filter(args: dict) -> str:
+def _do_create_filter(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
 
     criteria: dict[str, Any] = {}
@@ -1588,7 +1589,7 @@ def _do_create_filter(args: dict) -> str:
     )
 
 
-def _do_delete_filter(args: dict) -> str:
+def _do_delete_filter(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     service.users().settings().filters().delete(
         userId="me", id=args["filter_id"]

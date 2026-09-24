@@ -119,6 +119,8 @@ def _add() -> int:
             _free_port(port)
             time.sleep(1)
 
+    if creds is None:  # unreachable: the loop breaks or raises
+        raise RuntimeError("The OAuth flow returned no credentials.")
     if not creds.refresh_token:
         print(
             "No refresh token returned. Revoke the app's access at "

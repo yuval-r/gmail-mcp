@@ -68,7 +68,7 @@ def credentials_for(account: Account) -> Credentials:
         except (json.JSONDecodeError, AttributeError):
             token = None
     scopes = account.scopes.split() if account.scopes else SCOPES
-    return Credentials(
+    return Credentials(  # type: ignore[no-untyped-call]
         token=token,
         refresh_token=account.refresh_token,
         token_uri="https://oauth2.googleapis.com/token",
@@ -101,7 +101,7 @@ def build_service(account: Account, store: TokenStore) -> Any:
     creds = credentials_for(account)
     try:
         if not creds.valid:
-            creds.refresh(Request())
+            creds.refresh(Request())  # type: ignore[no-untyped-call]
             _persist_creds(account.email, creds, store)
     except Exception as e:  # google.auth.exceptions.RefreshError and friends
         raise GmailAuthError(
