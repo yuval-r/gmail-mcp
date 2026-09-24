@@ -671,6 +671,7 @@ async def list_tools() -> list[Tool]:
                         "minimum": 1,
                         "maximum": _READ_MESSAGES_MAX,
                     },
+                    "max_body_chars": _MAX_BODY_PROP,
                 },
                 "required": ["account"],
             },
@@ -1419,7 +1420,11 @@ def _do_read_messages(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
     # Clamp to 1.._READ_MESSAGES_MAX: a negative cap would slice ids[:-n]
     # and read nearly every id it was given.
-    cap = max(1, min(int(args.get("max_results", 25)), _READ_MESSAGES_MAX))
+    try:
+        requested = int(args.get("max_results", 25))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("max_results must be an integer.") from None
+    cap = max(1, min(requested, _READ_MESSAGES_MAX))
     ids: list[str] = list(args.get("message_ids") or [])
     if not ids and args.get("query"):
         ids, _ = _list_ids(service, args["query"], cap)
@@ -1429,8 +1434,9 @@ def _do_read_messages(args: dict[str, Any]) -> str:
         )
     ids = list(dict.fromkeys(ids))[:cap]
     blocks = [f"Read {len(ids)} message(s) from {args['account']}:\n"]
+    body_cap = _resolve_body_cap(args)
     for resource in _batch_get(service, ids, format="full"):
-        blocks.append(format_parsed_message(parse_message(resource)))
+        blocks.append(format_parsed_message(parse_message(resource), body_cap))
     return ("\n\n" + "-" * 60 + "\n\n").join(blocks)
 
 

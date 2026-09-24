@@ -383,6 +383,27 @@ def test_read_messages_cap_cannot_be_bypassed(fake_service, bad):
     assert 1 <= n <= server._READ_MESSAGES_MAX
 
 
+def test_read_messages_applies_the_body_cap(fake_service, monkeypatch):
+    # Same cap as read_message: server default, overridable per call.
+    monkeypatch.setattr(server.config, "max_body_chars", lambda: 4)
+    out = server._dispatch("read_messages", {
+        "account": "a@example.com", "message_ids": ["m1"],
+    })
+    assert "truncated" in out
+    out = server._dispatch("read_messages", {
+        "account": "a@example.com", "message_ids": ["m1"], "max_body_chars": 0,
+    })
+    assert "full body" in out and "truncated" not in out
+
+
+@pytest.mark.parametrize("bad", [None, "abc", float("nan"), [3]])
+def test_read_messages_bad_cap_is_a_clean_error(fake_service, bad):
+    with pytest.raises(ValueError, match="max_results"):
+        server._dispatch("read_messages", {
+            "account": "a@example.com", "message_ids": ["m1"], "max_results": bad,
+        })
+
+
 def test_read_messages_fetches_in_one_batch(fake_service):
     server._dispatch("read_messages", {
         "account": "a@example.com", "message_ids": ["m1", "m2", "m3"],

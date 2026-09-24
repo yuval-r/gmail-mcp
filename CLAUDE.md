@@ -81,10 +81,11 @@ tests/        — pytest; Gmail client is mocked, no live network
   `format_message_summary` / `format_parsed_message` still fence once each. The
   unwrapped inner content is built by `_summary_body` / `_parsed_body`; reuse
   those when adding an aggregator so the single-fence invariant holds.
-- **Body length is capped.** `read_message` / `read_thread` truncate each body
+- **Body length is capped.** `read_message` / `read_thread` / `read_messages`
+  truncate each body
   to `config.max_body_chars()` (env `GMAIL_MCP_MAX_BODY_CHARS`, default 500,
   `<=0` = unlimited) via `gmail.truncate_body`, which appends a recoverable
-  `… [truncated N chars — re-fetch with max_body_chars=0 …]` marker. Both tools
+  `… [truncated N chars — re-fetch with max_body_chars=0 …]` marker. All three
   accept a per-call `max_body_chars` arg (`_resolve_body_cap` resolves arg →
   config → unlimited). Search results are unaffected — they use Gmail's short
   `snippet`, not the full body.
