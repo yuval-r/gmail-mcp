@@ -130,9 +130,9 @@ def scan_command() -> list[str] | None:
 
     Honors ``GMAIL_MCP_SCAN_CMD`` (split like a shell command; an empty value
     turns scanning off). Otherwise uses ClamAV's ``clamscan`` if it is
-    installed. The file paths to scan are appended to the argv. The scanner
-    must follow the ClamAV exit-code convention: 0 clean, 1 threat found,
-    anything else an error.
+    installed. The server runs it once per file, with that file's path
+    appended to the argv. The scanner must follow the ClamAV exit-code
+    convention: 0 clean, 1 threat found, anything else an error.
     """
     raw = os.environ.get("GMAIL_MCP_SCAN_CMD")
     if raw is not None:

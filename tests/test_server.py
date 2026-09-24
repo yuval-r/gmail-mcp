@@ -953,7 +953,7 @@ def test_download_without_scanner_stays_in_quarantine(fake_service, downloads, m
 
 
 def test_download_threat_holds_only_the_bad_file(fake_service, downloads, monkeypatch):
-    # One scanner run covers the batch; a hit must not hold the clean files.
+    # A hit on one file must not hold the clean ones.
     monkeypatch.setattr(FakeMessages, "full_message", _message_with([
         _part("clean.pdf", "application/pdf", "att-1"),
         _part("bad.pdf", "application/pdf", "att-2"),
@@ -1063,17 +1063,7 @@ def test_download_scans_each_file_on_its_own(fake_service, downloads, monkeypatc
     assert log.read_text().split() == ["1", "1"]
 
 
-def test_download_stops_scanning_when_scanner_cannot_run(
-    fake_service, downloads, monkeypatch, tmp_path
-):
-    log = tmp_path / "calls.txt"
-    code = (
-        "import sys, time\n"
-        f"open({str(log)!r}, 'a').write('x')\n"
-        "time.sleep(5)\n"
-    )
-    monkeypatch.setattr(server, "_SCAN_TIMEOUT_S", 0.5)
-    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
+def _two_pdfs(monkeypatch):
     monkeypatch.setattr(FakeMessages, "full_message", _message_with([
         _part("a.pdf", "application/pdf", "att-1"),
         _part("b.pdf", "application/pdf", "att-2"),
@@ -1081,11 +1071,59 @@ def test_download_stops_scanning_when_scanner_cannot_run(
     monkeypatch.setattr(FakeAttachments, "payloads", {
         "att-1": _b64url_bytes(b"a"), "att-2": _b64url_bytes(b"b"),
     })
+
+
+def test_download_stops_scanning_when_scanner_cannot_start(
+    fake_service, downloads, monkeypatch
+):
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        raise FileNotFoundError(2, "No such file", argv[0])
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    _two_pdfs(monkeypatch)
     out = _download()
-    # A hung scanner is not started again for the next file.
-    assert log.read_text() == "x"
+    # A scanner that cannot start is not tried again for the next file, and
+    # its error text is not pinned on a file it never saw.
+    assert len(calls) == 1
     assert out.count("the virus scanner could not run") == 2
+    assert out.count("No such file") == 1
     assert not (downloads / MID).exists()
+
+
+def test_download_scan_budget_is_shared_across_files(fake_service, downloads, monkeypatch):
+    budgets = []
+
+    def run(argv, timeout, **kw):
+        budgets.append(timeout)
+        raise server.subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    monkeypatch.setattr(server, "_SCAN_TIMEOUT_S", 0.2)
+    _two_pdfs(monkeypatch)
+    # Deadline set at 0.0; #1 starts at 0.0; #2 would start at 0.3.
+    clock = iter([0.0, 0.0, 0.3])
+    monkeypatch.setattr(server.time, "monotonic", lambda: next(clock))
+    out = _download()
+    # #1 timed out and used the whole budget, so #2 is not scanned at all.
+    assert budgets == [0.2]
+    assert "#1" in out and "timed out" in out
+    assert "scan time limit" in out
+    assert not (downloads / MID).exists()
+
+
+def test_download_write_failure_is_refused_not_raised(fake_service, downloads, monkeypatch):
+    _one_pdf(monkeypatch)
+
+    def failing_write(dest_dir, filename, payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(server, "_write_attachment", failing_write)
+    out = _download()
+    assert "Refused 1" in out
+    assert "disk full" in out
 
 
 def test_download_clean_release_removes_empty_quarantine_dir(fake_service, downloads, monkeypatch):

@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -846,8 +847,10 @@ def _reply_headers(service: Any, thread_id: str) -> tuple[str | None, str | None
 # quarantine dir that shares the root.
 _MESSAGE_ID_RE = re.compile(r"[0-9a-fA-F]+")
 
-# clamscan loads its whole signature database on every run (a few seconds on
-# an Apple-silicon Mac); the ceiling covers slow disks and large archives.
+# Scan time budget for one download call, shared by all its files. clamscan
+# loads its whole signature database on every run (a few seconds on an
+# Apple-silicon Mac); the budget covers several files, slow disks and large
+# archives, and keeps a hung scanner from stacking one timeout per file.
 _SCAN_TIMEOUT_S = 300
 _SCAN_OUTPUT_CHARS = 2000
 
@@ -898,16 +901,13 @@ def _write_attachment(dest_dir: Path, filename: str, payload: bytes) -> Path:
     return path
 
 
-def _scan(path: Path) -> tuple[str, str]:
-    """Run the configured virus scanner over one file.
+def _scan(cmd: list[str], path: Path, timeout: float) -> tuple[str, str]:
+    """Run the virus scanner ``cmd`` over one file.
 
     Returns ``(verdict, detail)``, where verdict is ``clean``, ``threat``,
-    ``error`` (the scanner ran and failed), ``broken`` (it could not run or
-    timed out) or ``unscanned``. Only ``clean`` may release a file.
+    ``error`` (the scanner ran and failed, or timed out) or ``broken`` (it
+    could not start). Only ``clean`` may release a file.
     """
-    cmd = config.scan_command()
-    if cmd is None:
-        return "unscanned", ""
     try:
         proc = subprocess.run(
             [*cmd, str(path)],
@@ -916,10 +916,12 @@ def _scan(path: Path) -> tuple[str, str]:
             capture_output=True,
             text=True,
             errors="replace",
-            timeout=_SCAN_TIMEOUT_S,
+            timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired:
+        return "error", f"timed out after {timeout:.0f}s"
+    except OSError as e:
         return "broken", str(e)
     output = (proc.stdout + proc.stderr).strip()[-_SCAN_OUTPUT_CHARS:]
     if proc.returncode == 0:
@@ -932,15 +934,22 @@ def _scan(path: Path) -> tuple[str, str]:
 def _scan_each(paths: list[Path]) -> list[tuple[str, str]]:
     """One verdict per path, each from a scanner run over that file alone.
 
-    Per-file runs keep every verdict tied to exactly one file. A scanner that
-    cannot run at all is not started again for the rest.
+    Per-file runs keep every verdict tied to exactly one file. All runs share
+    one time budget, and a scanner that cannot start is not tried again.
     """
+    cmd = config.scan_command()
+    if cmd is None:
+        return [("unscanned", "")] * len(paths)
+    deadline = time.monotonic() + _SCAN_TIMEOUT_S
     verdicts: list[tuple[str, str]] = []
     for path in paths:
+        remaining = deadline - time.monotonic()
         if verdicts and verdicts[-1][0] == "broken":
-            verdicts.append(verdicts[-1])
+            verdicts.append(("broken", ""))  # the error is already reported once
+        elif remaining <= 0:
+            verdicts.append(("error", "not scanned: the scan time limit ran out"))
         else:
-            verdicts.append(_scan(path))
+            verdicts.append(_scan(cmd, path, remaining))
     return verdicts
 
 
@@ -1023,7 +1032,13 @@ def _do_download_attachments(args: dict) -> str:
                 f"exceeds the {max_bytes}-byte limit"
             )
             continue
-        path = _write_attachment(held_dir, name, payload)
+        try:
+            path = _write_attachment(held_dir, name, payload)
+        except (OSError, ValueError) as e:
+            refused.append(
+                f"  #{ordinal}  {name}: could not be written to quarantine ({e})"
+            )
+            continue
         note = f"  [{verdict.warning}]" if verdict.warning else ""
         written.append(
             (ordinal, path, f"({att.mime_type}, {len(payload)} bytes){note}")
@@ -1063,6 +1078,7 @@ def _do_download_attachments(args: dict) -> str:
         )
         lines.extend(released)
     if held:
+        held.sort(key=lambda h: h[0][0])  # release failures join late; keep #N order
         lines.append(
             f"Held {len(held)} attachment(s) from message {message_id} in "
             "quarantine, NOT released. Do not open them:"
@@ -1073,7 +1089,9 @@ def _do_download_attachments(args: dict) -> str:
         )
         # Scanner output echoes attacker-chosen filenames, so it is fenced.
         details = "\n".join(
-            f"#{ordinal} {detail}" for (ordinal, _, _), _, detail in held if detail
+            f"#{ordinal} {line}"
+            for (ordinal, _, _), _, detail in held
+            for line in detail.splitlines()
         )
         if details:
             lines.append("Details:")
