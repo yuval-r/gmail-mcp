@@ -911,8 +911,8 @@ def _scan_files(paths: list[Path]) -> list[tuple[str, str]]:
     scanner could not start) or ``unscanned``. Only ``clean`` may release a
     file. Each file's verdict comes from its own ClamAV-style result line:
     ``<path>: OK`` or ``<path>: Empty file`` is clean, ``<path>: <sig> FOUND``
-    a threat, any other line an error. A file with no line falls back to the exit code: 0 is clean,
-    anything else an error.
+    a threat, any other line an error. A file with no line falls back to the
+    exit code: 0 is clean, anything else an error.
     """
     if not paths:
         return []  # with no paths, clamscan would scan the working directory

@@ -387,16 +387,15 @@ low-stakes:
   scans attachments server-side but does not expose the verdict through its API.
   There is no malware field on the message or attachment resource, and
   `attachments.get` will serve bytes the Gmail web UI refuses to let you
-  download. So files that pass the screen are written to
-  a fresh per-download folder under `~/.gmail-mcp/attachments/quarantine/<message_id>/`
-  and handed to a local
-  scanner: ClamAV's `clamscan` when it is installed, or whatever
-  `GMAIL_MCP_SCAN_CMD` names, in one run per download. Each file's verdict
-  comes from its own result line, and only a file that scans clean moves to
+  download. So files that pass the screen are written to a fresh per-download
+  folder under `~/.gmail-mcp/attachments/quarantine/<message_id>/` and handed to
+  a local scanner: ClamAV's `clamscan` when it is installed, or whatever
+  `GMAIL_MCP_SCAN_CMD` names, in one run per download. Each file's verdict comes
+  from its own result line, and only a file that scans clean moves to
   `~/.gmail-mcp/attachments/<message_id>/`. A threat, a scanner error, or no
-  scanner at all leaves it in quarantine and says so. A clean scan
-  lowers the risk; it does not prove a file safe. The saved file's *contents*
-  remain untrusted third-party data.
+  scanner at all leaves it in quarantine and says so. A clean scan lowers the
+  risk; it does not prove a file safe. The saved file's *contents* remain
+  untrusted third-party data.
 
   To set up ClamAV on macOS: `brew install clamav`, copy
   `$(brew --prefix)/etc/clamav/freshclam.conf.sample` to `freshclam.conf` and

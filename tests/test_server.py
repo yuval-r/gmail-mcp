@@ -1138,6 +1138,7 @@ def test_download_calls_never_share_quarantine_files(fake_service, downloads, mo
     _download()
     assert len(seen) == 2 and seen[0] != seen[1]
 
+
 def test_download_all_refused_runs_no_scanner(fake_service, downloads, monkeypatch):
     # With nothing written, clamscan must not run: with no paths it would
     # scan the server's working directory.
