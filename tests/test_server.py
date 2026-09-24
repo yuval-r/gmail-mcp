@@ -976,7 +976,7 @@ def test_download_threat_holds_only_the_bad_file(fake_service, downloads, monkey
     assert "NOT released" in out
 
 
-def test_download_batch_error_rescans_so_clean_files_release(
+def test_download_scan_error_holds_only_that_file(
     fake_service, downloads, monkeypatch
 ):
     monkeypatch.setattr(FakeMessages, "full_message", _message_with([
@@ -1001,25 +1001,6 @@ def test_download_batch_error_rescans_so_clean_files_release(
     assert out.count("Can not open file ERROR") == 1
 
 
-def test_download_batch_threat_no_rescan_confirms_holds_all(
-    fake_service, downloads, monkeypatch
-):
-    # The batch run flags a threat that no single-file run reproduces: nothing
-    # may be released on the strength of the single runs alone.
-    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
-        _part("a.pdf", "application/pdf", "att-1"),
-        _part("b.pdf", "application/pdf", "att-2"),
-    ]))
-    monkeypatch.setattr(FakeAttachments, "payloads", {
-        "att-1": _b64url_bytes(b"a"), "att-2": _b64url_bytes(b"b"),
-    })
-    code = "import sys\nprint('combo FOUND')\nsys.exit(1 if len(sys.argv) > 2 else 0)\n"
-    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
-    out = _download()
-    assert not (downloads / MID).exists()
-    assert "NOT released" in out
-
-
 def test_download_replaces_symlink_at_target_name(fake_service, downloads, monkeypatch, tmp_path):
     # rename(2) replaces a planted link; it must neither follow it nor abort.
     decoy = tmp_path / "decoy"
@@ -1038,29 +1019,73 @@ def test_download_release_failure_is_reported_not_raised(
     fake_service, downloads, monkeypatch
 ):
     _one_pdf(monkeypatch)
-    real_replace = server.os.replace
 
     def failing_replace(src, dst):
         raise OSError("disk full")
 
     monkeypatch.setattr(server.os, "replace", failing_replace)
     out = _download()
-    monkeypatch.setattr(server.os, "replace", real_replace)
     assert (downloads / "quarantine" / MID / "01-invoice.pdf").exists()
-    assert "NOT released" in out
-    assert "disk full" in out
+    assert "#1" in out and "could not be moved out of quarantine" in out
+    assert "#1 disk full" in out
 
 
 def test_download_refuses_symlinked_message_dir(fake_service, downloads, monkeypatch, tmp_path):
-    # A symlink planted at the release dir must not carry the file out of the root.
+    # A symlink planted at the release dir must not carry the file out of the
+    # root, and the refusal is reported, not raised, so nothing else is lost.
     outside = tmp_path / "outside"
     outside.mkdir()
     downloads.mkdir(parents=True)
     (downloads / MID).symlink_to(outside)
     _one_pdf(monkeypatch)
-    with pytest.raises(ValueError, match="outside the attachment root"):
-        _download()
+    out = _download()
     assert not any(outside.iterdir())
+    assert (downloads / "quarantine" / MID / "01-invoice.pdf").exists()
+    assert "could not be moved out of quarantine" in out
+    assert "outside the attachment root" in out
+
+
+def test_download_scans_each_file_on_its_own(fake_service, downloads, monkeypatch, tmp_path):
+    log = tmp_path / "calls.txt"
+    code = (
+        "import sys\n"
+        f"open({str(log)!r}, 'a').write(str(len(sys.argv) - 1) + '\\n')\n"
+    )
+    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
+    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
+        _part("a.pdf", "application/pdf", "att-1"),
+        _part("b.pdf", "application/pdf", "att-2"),
+    ]))
+    monkeypatch.setattr(FakeAttachments, "payloads", {
+        "att-1": _b64url_bytes(b"a"), "att-2": _b64url_bytes(b"b"),
+    })
+    _download()
+    assert log.read_text().split() == ["1", "1"]
+
+
+def test_download_stops_scanning_when_scanner_cannot_run(
+    fake_service, downloads, monkeypatch, tmp_path
+):
+    log = tmp_path / "calls.txt"
+    code = (
+        "import sys, time\n"
+        f"open({str(log)!r}, 'a').write('x')\n"
+        "time.sleep(5)\n"
+    )
+    monkeypatch.setattr(server, "_SCAN_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
+    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
+        _part("a.pdf", "application/pdf", "att-1"),
+        _part("b.pdf", "application/pdf", "att-2"),
+    ]))
+    monkeypatch.setattr(FakeAttachments, "payloads", {
+        "att-1": _b64url_bytes(b"a"), "att-2": _b64url_bytes(b"b"),
+    })
+    out = _download()
+    # A hung scanner is not started again for the next file.
+    assert log.read_text() == "x"
+    assert out.count("the virus scanner could not run") == 2
+    assert not (downloads / MID).exists()
 
 
 def test_download_clean_release_removes_empty_quarantine_dir(fake_service, downloads, monkeypatch):

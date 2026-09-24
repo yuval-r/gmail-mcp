@@ -39,6 +39,7 @@ from gmail_mcp.gmail import (
     resolve_label_ids,
     sanitize_filename,
     screen_attachment,
+    wrap_untrusted,
 )
 from gmail_mcp.store import Account, TokenStore
 
@@ -897,18 +898,19 @@ def _write_attachment(dest_dir: Path, filename: str, payload: bytes) -> Path:
     return path
 
 
-def _scan(paths: list[Path]) -> tuple[str, str]:
-    """Run the configured virus scanner over ``paths``.
+def _scan(path: Path) -> tuple[str, str]:
+    """Run the configured virus scanner over one file.
 
     Returns ``(verdict, detail)``, where verdict is ``clean``, ``threat``,
-    ``error`` or ``unscanned``. Only ``clean`` may release a file.
+    ``error`` (the scanner ran and failed), ``broken`` (it could not run or
+    timed out) or ``unscanned``. Only ``clean`` may release a file.
     """
     cmd = config.scan_command()
     if cmd is None:
         return "unscanned", ""
     try:
         proc = subprocess.run(
-            [*cmd, *map(str, paths)],
+            [*cmd, str(path)],
             # stdin is the MCP JSON-RPC stream; the scanner must never read it.
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -918,7 +920,7 @@ def _scan(paths: list[Path]) -> tuple[str, str]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
-        return "error", str(e)
+        return "broken", str(e)
     output = (proc.stdout + proc.stderr).strip()[-_SCAN_OUTPUT_CHARS:]
     if proc.returncode == 0:
         return "clean", ""
@@ -928,24 +930,25 @@ def _scan(paths: list[Path]) -> tuple[str, str]:
 
 
 def _scan_each(paths: list[Path]) -> list[tuple[str, str]]:
-    """One verdict per path, in order.
+    """One verdict per path, each from a scanner run over that file alone.
 
-    One scanner run covers the batch. Only if it is not clean are the files
-    rescanned one at a time, so a single bad file does not hold clean ones.
+    Per-file runs keep every verdict tied to exactly one file. A scanner that
+    cannot run at all is not started again for the rest.
     """
-    batch = _scan(paths)
-    if batch[0] in ("clean", "unscanned") or len(paths) == 1:
-        return [batch] * len(paths)
-    singles = [_scan([path]) for path in paths]
-    if batch[0] == "threat" and all(v != "threat" for v, _ in singles):
-        # No single run can place the batch's threat, so trust none of them.
-        return [batch] * len(paths)
-    return singles
+    verdicts: list[tuple[str, str]] = []
+    for path in paths:
+        if verdicts and verdicts[-1][0] == "broken":
+            verdicts.append(verdicts[-1])
+        else:
+            verdicts.append(_scan(path))
+    return verdicts
 
 
 _HELD_REASON = {
     "threat": "the virus scan found a threat",
     "error": "the virus scan failed",
+    "broken": "the virus scanner could not run",
+    "release": "scanned clean, but could not be moved out of quarantine",
     "unscanned": (
         "NOT scanned: no virus scanner is configured (install ClamAV, or "
         "check GMAIL_MCP_SCAN_CMD)"
@@ -1026,23 +1029,27 @@ def _do_download_attachments(args: dict) -> str:
             (ordinal, path, f"({att.mime_type}, {len(payload)} bytes){note}")
         )
 
-    verdicts = _scan_each([path for _, path, _ in written]) if written else []
+    verdicts = _scan_each([path for _, path, _ in written])
     clean = [w for w, (v, _) in zip(written, verdicts, strict=True) if v == "clean"]
     held = [(w, v, d) for w, (v, d) in zip(written, verdicts, strict=True) if v != "clean"]
 
     released: list[str] = []
     if clean:
-        dest_dir = config.attachments_dir() / message_id
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        # A symlinked message dir must not carry files out of the root.
-        _inside_root(dest_dir)
+        try:
+            dest_dir = config.attachments_dir() / message_id
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            # A symlinked message dir must not carry files out of the root.
+            dest_dir = _inside_root(dest_dir)
+        except (OSError, ValueError) as e:
+            held.extend((w, "release", str(e)) for w in clean)
+            clean = []
         for ordinal, path, info in clean:
             target = dest_dir / path.name
             try:
                 # rename(2) replaces a symlink planted at target, never follows it.
                 os.replace(path, target)
             except OSError as e:
-                held.append(((ordinal, path, info), "error", str(e)))
+                held.append(((ordinal, path, info), "release", str(e)))
                 continue
             released.append(f"  #{ordinal}  {target} {info}")
         with contextlib.suppress(OSError):
@@ -1064,10 +1071,13 @@ def _do_download_attachments(args: dict) -> str:
             f"  #{ordinal}  {path} {info}: {_HELD_REASON[scan]}"
             for (ordinal, path, info), scan, _ in held
         )
-        output = list(dict.fromkeys(d for _, _, d in held if d))
-        if output:
+        # Scanner output echoes attacker-chosen filenames, so it is fenced.
+        details = "\n".join(
+            f"#{ordinal} {detail}" for (ordinal, _, _), _, detail in held if detail
+        )
+        if details:
             lines.append("Details:")
-            lines.extend(f"  {line}" for d in output for line in d.splitlines())
+            lines.append(wrap_untrusted(details))
     if refused:
         lines.append(f"Refused {len(refused)} attachment(s):")
         lines.extend(refused)
