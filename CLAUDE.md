@@ -121,14 +121,18 @@ tests/        — pytest; Gmail client is mocked, no live network
   code. Only a clean verdict releases a file, by rename into
   `<root>/<message_id>/` after an `_inside_root` check on that dir. Threat,
   scanner error, a scanner that cannot run, no scanner, or a failed rename
-  means it stays held, reported per `#N`; nothing purges held files. Never
-  release without a clean scan. The default argv carries
-  `--alert-exceeds-max`: without it clamscan prints `OK` for content it
-  skipped at a limit (e.g. EICAR nested 20 zips deep). The per-call dir means
-  two calls (or two server processes) never share a file mid-scan; do not
-  replace it with a shared path plus a lock. The download result omits the
-  MIME type: it is sender-chosen and that output is trusted text.
-  `_MESSAGE_ID_RE` is hex-only so no message id can name the `quarantine` dir.
+  means it stays held, reported per `#N`. `_purge_quarantine` deletes held
+  files and emptied dirs older than `config.quarantine_max_age_days()` (env
+  `GMAIL_MCP_QUARANTINE_DAYS`, default 30, `<=0` keeps them) at the start of
+  each download; it never follows symlinks and judges a dir by its pre-purge
+  mtime so a parallel call's fresh dir survives. Never release without a clean
+  scan. The default argv carries `--alert-exceeds-max`: without it clamscan
+  prints `OK` for content it skipped at a limit (e.g. EICAR nested 20 zips
+  deep). The per-call dir means two calls (or two server processes) never
+  share a file mid-scan; do not replace it with a shared path plus a lock. The
+  download result omits the MIME type: it is sender-chosen and that output is
+  trusted text. `_MESSAGE_ID_RE` is hex-only so no message id can name the
+  `quarantine` dir.
 - **Attachments are addressed by `#N`, not by attachment id.** `_parsed_body`
   numbers them and deliberately omits the raw `attachmentId`; the download tool
   takes the same ordinal. Both sides get their ordering from one payload walk

@@ -393,7 +393,8 @@ low-stakes:
   `GMAIL_MCP_SCAN_CMD` names, in one run per download. Each file's verdict comes
   from its own result line, and only a file that scans clean moves to
   `~/.gmail-mcp/attachments/<message_id>/`. A threat, a scanner error, or no
-  scanner at all leaves it in quarantine and says so. A clean scan lowers the
+  scanner at all leaves it in quarantine and says so; held files are deleted
+  after 30 days (`GMAIL_MCP_QUARANTINE_DAYS`). A clean scan lowers the
   risk; it does not prove a file safe. The saved file's *contents* remain
   untrusted third-party data.
 
@@ -479,6 +480,7 @@ All optional — sane defaults under `~/.gmail-mcp/`.
 | `GMAIL_MCP_OAUTH_PORT` | `8765` | Fixed loopback port for the auth flow (forward this over SSH on a headless box). |
 | `GMAIL_MCP_ATTACHMENT_DIR` | `~/.gmail-mcp/attachments` | Download root for `download_attachments`. Files land in a per-message subdirectory. This is the only location the server writes to. |
 | `GMAIL_MCP_SCAN_CMD` | `clamscan` if installed | Virus scanner run on quarantined downloads, split like a shell command and run once per download, with every file path appended. Per-file results come from ClamAV-style `<path>: OK` (or `Empty file`) / `<path>: <sig> FOUND` lines; a scanner that prints none must exit 0 for clean (anything else holds every file). The default `clamscan` runs with `--alert-exceeds-max`, so an archive too deep or too large to scan fully is held, not passed; add it to a custom `clamscan` command too. An empty value turns scanning off, so downloads stay in quarantine. |
+| `GMAIL_MCP_QUARANTINE_DAYS` | `30` | Held downloads (threat, scan error, unscanned) older than this are deleted at the start of the next download. `0` (or negative) keeps them forever. |
 | `GMAIL_MCP_MAX_ATTACHMENT_BYTES` | `26214400` (25 MB) | Per-attachment size ceiling. Gmail's own limit is 25 MB, so this refuses nothing Gmail would deliver. `0` (or negative) means unlimited. |
 | `GMAIL_MCP_MAX_BODY_CHARS` | `500` | Default per-message body cap for `read_message`/`read_thread`. Deliberately tight so reads are cheap by default; `0` (or negative) means unlimited, and a per-call `max_body_chars` argument overrides it. |
 

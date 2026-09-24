@@ -121,6 +121,24 @@ def quarantine_dir() -> Path:
     return attachments_dir() / "quarantine"
 
 
+_DEFAULT_QUARANTINE_DAYS = 30
+
+
+def quarantine_max_age_days() -> int:
+    """Days a held download stays in quarantine before it is purged.
+
+    Honors ``GMAIL_MCP_QUARANTINE_DAYS``; defaults to 30. A value <= 0 keeps
+    held files forever. A malformed value falls back to the default.
+    """
+    raw = os.environ.get("GMAIL_MCP_QUARANTINE_DAYS")
+    if raw is None:
+        return _DEFAULT_QUARANTINE_DAYS
+    try:
+        return int(raw)
+    except ValueError:
+        return _DEFAULT_QUARANTINE_DAYS
+
+
 # Homebrew's bin dirs are not always on the PATH an MCP client gives a server.
 _CLAMSCAN_FALLBACKS = ("/opt/homebrew/bin/clamscan", "/usr/local/bin/clamscan")
 

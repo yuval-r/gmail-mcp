@@ -15,8 +15,10 @@ import json
 import logging
 import os
 import re
+import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -982,6 +984,47 @@ _HELD_REASON = {
 }
 
 
+def _purge_quarantine() -> None:
+    """Delete held files, and the dirs they leave empty, past the age limit.
+
+    Runs at the start of each download, never on a timer. Only regular files
+    and real dirs are touched; symlinks are neither followed nor removed. A
+    dir counts as old by its own mtime taken before anything is deleted, so a
+    parallel download's fresh, still-empty dir is never removed from under it.
+    A purge problem is logged and never fails the download.
+    """
+    days = config.quarantine_max_age_days()
+    root = config.quarantine_dir()
+    if days <= 0 or root.is_symlink() or not root.is_dir():
+        return
+    cutoff = time.time() - days * 86400
+    try:
+        walk = list(os.walk(root, topdown=False))  # followlinks=False
+        old_dirs = {
+            Path(d) / name
+            for d, dirs, _ in walk
+            for name in dirs
+            if _older(Path(d) / name, cutoff, stat.S_ISDIR)
+        }
+        for d, dirs, files in walk:
+            for name in files:
+                path = Path(d) / name
+                if _older(path, cutoff, stat.S_ISREG):
+                    path.unlink()
+            for name in dirs:
+                if Path(d) / name in old_dirs:
+                    with contextlib.suppress(OSError):
+                        (Path(d) / name).rmdir()  # only once it is empty
+    except OSError:
+        logger.warning("Quarantine purge failed", exc_info=True)
+
+
+def _older(path: Path, cutoff: float, is_kind: Any) -> bool:
+    """True for a path of the given kind (never a symlink) last changed before cutoff."""
+    st = path.lstat()
+    return bool(is_kind(st.st_mode)) and st.st_mtime < cutoff
+
+
 def _select_attachments(
     msg: ParsedMessage, index: int | None
 ) -> list[tuple[int, Attachment]]:
@@ -1009,6 +1052,7 @@ def _do_download_attachments(args: dict) -> str:
             "Take the id from a search or read result."
         )
 
+    _purge_quarantine()
     service = _service_for(args["account"])
     resource = (
         service.users()

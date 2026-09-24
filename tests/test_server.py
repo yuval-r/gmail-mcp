@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import sys
 import time
 from pathlib import Path
@@ -1206,6 +1207,70 @@ def test_download_calls_never_share_quarantine_files(fake_service, downloads, mo
     _download()
     _download()
     assert len(seen) == 2 and seen[0] != seen[1]
+
+
+def _age(path, days):
+    t = time.time() - days * 86400
+    os.utime(path, (t, t), follow_symlinks=False)
+
+
+def _old_held_file(downloads, days, name="01-old.pdf"):
+    held = downloads / "quarantine" / "abc123" / "dl-old"
+    held.mkdir(parents=True)
+    f = held / name
+    f.write_bytes(b"held")
+    for p in (f, held, held.parent):
+        _age(p, days)
+    return f
+
+
+def test_purge_removes_held_files_past_the_limit(downloads, monkeypatch):
+    monkeypatch.setattr(server.config, "quarantine_max_age_days", lambda: 30)
+    old = _old_held_file(downloads, 31)
+    server._purge_quarantine()
+    assert not old.exists()
+    assert not (downloads / "quarantine" / "abc123").exists()
+
+
+def test_purge_keeps_recent_files_and_fresh_dirs(downloads, monkeypatch):
+    monkeypatch.setattr(server.config, "quarantine_max_age_days", lambda: 30)
+    recent = _old_held_file(downloads, 2)
+    # A parallel download's dir, just made and still empty, must survive.
+    fresh = downloads / "quarantine" / "def456" / "dl-new"
+    fresh.mkdir(parents=True)
+    server._purge_quarantine()
+    assert recent.exists()
+    assert fresh.is_dir()
+
+
+def test_purge_disabled_at_zero_days(downloads, monkeypatch):
+    monkeypatch.setattr(server.config, "quarantine_max_age_days", lambda: 0)
+    old = _old_held_file(downloads, 400)
+    server._purge_quarantine()
+    assert old.exists()
+
+
+def test_purge_never_follows_symlinks(downloads, monkeypatch, tmp_path):
+    monkeypatch.setattr(server.config, "quarantine_max_age_days", lambda: 30)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "keep.txt"
+    victim.write_bytes(b"keep")
+    _age(victim, 400)
+    held = downloads / "quarantine" / "abc123" / "dl-old"
+    held.mkdir(parents=True)
+    (held / "link").symlink_to(victim)
+    (downloads / "quarantine" / "linkdir").symlink_to(outside)
+    server._purge_quarantine()
+    assert victim.read_bytes() == b"keep"
+
+
+def test_download_runs_the_purge(fake_service, downloads, monkeypatch):
+    monkeypatch.setattr(server.config, "quarantine_max_age_days", lambda: 30)
+    old = _old_held_file(downloads, 31)
+    _one_pdf(monkeypatch)
+    _download()
+    assert not old.exists()
 
 
 def test_download_all_refused_runs_no_scanner(fake_service, downloads, monkeypatch):
