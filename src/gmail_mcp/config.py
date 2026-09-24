@@ -130,9 +130,10 @@ def scan_command() -> list[str] | None:
 
     Honors ``GMAIL_MCP_SCAN_CMD`` (split like a shell command; an empty value
     turns scanning off). Otherwise uses ClamAV's ``clamscan`` if it is
-    installed. The server runs it once per file, with that file's path
-    appended to the argv. The scanner must follow the ClamAV exit-code
-    convention: 0 clean, 1 threat found, anything else an error.
+    installed. The server runs it once per download, with every file path
+    appended to the argv. Per-file results are read from ClamAV-style lines
+    (``<path>: OK`` / ``<path>: <sig> FOUND``); a scanner that prints none is
+    judged by exit code alone: 0 clean, anything else holds every file.
     """
     raw = os.environ.get("GMAIL_MCP_SCAN_CMD")
     if raw is not None:
@@ -142,7 +143,8 @@ def scan_command() -> list[str] | None:
     )
     if found is None:
         return None
-    return [found, "--no-summary", "--infected", "--stdout"]
+    # No --infected: the "<path>: OK" lines are how clean files are told apart.
+    return [found, "--no-summary", "--stdout"]
 
 
 def max_attachment_bytes() -> int:

@@ -112,8 +112,9 @@ tests/        — pytest; Gmail client is mocked, no live network
   blocks. The scan is a separate local step: files that pass the screen are
   written to `config.quarantine_dir()/<message_id>/` (under the attachment
   root) and `_scan` runs `config.scan_command()` (`GMAIL_MCP_SCAN_CMD`, else
-  ClamAV `clamscan`) over each file on its own (`_scan_each`), so every
-  verdict names one file. Only exit 0 releases a file, by rename into
+  ClamAV `clamscan`) once over all of them (`_scan_files`); each file's
+  verdict is parsed from its own `<path>: OK` / `FOUND` line, else from the
+  exit code. Only a clean verdict releases a file, by rename into
   `<root>/<message_id>/` after an `_inside_root` check on that dir. Threat,
   scanner error, a scanner that cannot run, no scanner, or a failed rename
   means it stays held, reported per `#N`; nothing purges held files.

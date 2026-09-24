@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import sys
+import time
 
 import pytest
 from googleapiclient.errors import HttpError
@@ -963,8 +964,11 @@ def test_download_threat_holds_only_the_bad_file(fake_service, downloads, monkey
     })
     code = (
         "import sys, pathlib\n"
-        "bad = [a for a in sys.argv[1:] if pathlib.Path(a).read_bytes() == b'EICAR']\n"
-        "for a in bad: print(a + ': Eicar-Test-Signature FOUND')\n"
+        "bad = False\n"
+        "for a in sys.argv[1:]:\n"
+        "    hit = pathlib.Path(a).read_bytes() == b'EICAR'\n"
+        "    bad = bad or hit\n"
+        "    print(a + (': Eicar-Test-Signature FOUND' if hit else ': OK'))\n"
         "sys.exit(1 if bad else 0)\n"
     )
     monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
@@ -988,8 +992,11 @@ def test_download_scan_error_holds_only_that_file(
     })
     code = (
         "import sys, pathlib\n"
-        "bad = [a for a in sys.argv[1:] if pathlib.Path(a).read_bytes() == b'LOCKED']\n"
-        "for a in bad: print(a + ': Can not open file ERROR')\n"
+        "bad = False\n"
+        "for a in sys.argv[1:]:\n"
+        "    hit = pathlib.Path(a).read_bytes() == b'LOCKED'\n"
+        "    bad = bad or hit\n"
+        "    print(a + (': Can not open file ERROR' if hit else ': OK'))\n"
         "sys.exit(2 if bad else 0)\n"
     )
     monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
@@ -1045,24 +1052,6 @@ def test_download_refuses_symlinked_message_dir(fake_service, downloads, monkeyp
     assert "outside the attachment root" in out
 
 
-def test_download_scans_each_file_on_its_own(fake_service, downloads, monkeypatch, tmp_path):
-    log = tmp_path / "calls.txt"
-    code = (
-        "import sys\n"
-        f"open({str(log)!r}, 'a').write(str(len(sys.argv) - 1) + '\\n')\n"
-    )
-    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
-    monkeypatch.setattr(FakeMessages, "full_message", _message_with([
-        _part("a.pdf", "application/pdf", "att-1"),
-        _part("b.pdf", "application/pdf", "att-2"),
-    ]))
-    monkeypatch.setattr(FakeAttachments, "payloads", {
-        "att-1": _b64url_bytes(b"a"), "att-2": _b64url_bytes(b"b"),
-    })
-    _download()
-    assert log.read_text().split() == ["1", "1"]
-
-
 def _two_pdfs(monkeypatch):
     monkeypatch.setattr(FakeMessages, "full_message", _message_with([
         _part("a.pdf", "application/pdf", "att-1"),
@@ -1073,7 +1062,32 @@ def _two_pdfs(monkeypatch):
     })
 
 
-def test_download_stops_scanning_when_scanner_cannot_start(
+def test_download_scans_all_files_in_one_run(fake_service, downloads, monkeypatch, tmp_path):
+    # One run, one signature-database load, however many attachments.
+    log = tmp_path / "calls.txt"
+    code = (
+        "import sys\n"
+        f"open({str(log)!r}, 'a').write(str(len(sys.argv) - 1) + '\\n')\n"
+    )
+    monkeypatch.setattr(server.config, "scan_command", lambda: [sys.executable, "-c", code])
+    _two_pdfs(monkeypatch)
+    _download()
+    assert log.read_text().split() == ["2"]
+
+
+def test_download_file_without_result_line_follows_exit_code(
+    fake_service, downloads, monkeypatch
+):
+    # A scanner that prints nothing per file is judged by exit code alone,
+    # so a non-zero exit holds every file.
+    monkeypatch.setattr(server.config, "scan_command", lambda: _scanner(1, stdout="hit"))
+    _two_pdfs(monkeypatch)
+    out = _download()
+    assert not (downloads / MID).exists()
+    assert out.count("the virus scan failed") == 2
+
+
+def test_download_reports_scanner_that_cannot_start(
     fake_service, downloads, monkeypatch
 ):
     calls = []
@@ -1085,32 +1099,24 @@ def test_download_stops_scanning_when_scanner_cannot_start(
     monkeypatch.setattr(server.subprocess, "run", run)
     _two_pdfs(monkeypatch)
     out = _download()
-    # A scanner that cannot start is not tried again for the next file, and
-    # its error text is not pinned on a file it never saw.
+    # The error is about the scanner, so it is reported once, not per file.
     assert len(calls) == 1
-    assert out.count("the virus scanner could not run") == 2
+    assert out.count("the virus scanner could not start") == 2
     assert out.count("No such file") == 1
     assert not (downloads / MID).exists()
 
 
-def test_download_scan_budget_is_shared_across_files(fake_service, downloads, monkeypatch):
-    budgets = []
-
-    def run(argv, timeout, **kw):
-        budgets.append(timeout)
-        raise server.subprocess.TimeoutExpired(argv, timeout)
-
-    monkeypatch.setattr(server.subprocess, "run", run)
-    monkeypatch.setattr(server, "_SCAN_TIMEOUT_S", 0.2)
+def test_download_kills_hung_scanner(fake_service, downloads, monkeypatch):
+    monkeypatch.setattr(server, "_SCAN_TIMEOUT_S", 1)
+    monkeypatch.setattr(
+        server.config, "scan_command",
+        lambda: [sys.executable, "-c", "import time; time.sleep(30)"],
+    )
     _two_pdfs(monkeypatch)
-    # Deadline set at 0.0; #1 starts at 0.0; #2 would start at 0.3.
-    clock = iter([0.0, 0.0, 0.3])
-    monkeypatch.setattr(server.time, "monotonic", lambda: next(clock))
+    start = time.monotonic()
     out = _download()
-    # #1 timed out and used the whole budget, so #2 is not scanned at all.
-    assert budgets == [0.2]
-    assert "#1" in out and "timed out" in out
-    assert "scan time limit" in out
+    assert time.monotonic() - start < 10
+    assert out.count("the virus scanner timed out") == 2
     assert not (downloads / MID).exists()
 
 
@@ -1124,6 +1130,7 @@ def test_download_write_failure_is_refused_not_raised(fake_service, downloads, m
     out = _download()
     assert "Refused 1" in out
     assert "disk full" in out
+    assert not (downloads / "quarantine" / MID).exists()
 
 
 def test_download_clean_release_removes_empty_quarantine_dir(fake_service, downloads, monkeypatch):

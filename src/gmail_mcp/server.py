@@ -15,7 +15,6 @@ import logging
 import os
 import re
 import subprocess
-import time
 from pathlib import Path
 from typing import Any
 
@@ -847,12 +846,11 @@ def _reply_headers(service: Any, thread_id: str) -> tuple[str | None, str | None
 # quarantine dir that shares the root.
 _MESSAGE_ID_RE = re.compile(r"[0-9a-fA-F]+")
 
-# Scan time budget for one download call, shared by all its files. clamscan
-# loads its whole signature database on every run (a few seconds on an
-# Apple-silicon Mac); the budget covers several files, slow disks and large
-# archives, and keeps a hung scanner from stacking one timeout per file.
+# One scanner run per download call. clamscan loads its whole signature
+# database per run (a few seconds on an Apple-silicon Mac); the ceiling covers
+# slow disks and large archives.
 _SCAN_TIMEOUT_S = 300
-_SCAN_OUTPUT_CHARS = 2000
+_SCAN_OUTPUT_CHARS = 500
 
 
 def _attachment_bytes(service: Any, message_id: str, att: Attachment) -> bytes:
@@ -901,62 +899,59 @@ def _write_attachment(dest_dir: Path, filename: str, payload: bytes) -> Path:
     return path
 
 
-def _scan(cmd: list[str], path: Path, timeout: float) -> tuple[str, str]:
-    """Run the virus scanner ``cmd`` over one file.
+def _scan_files(paths: list[Path]) -> list[tuple[str, str]]:
+    """One ``(verdict, detail)`` per path, from ONE scanner run over all of them.
 
-    Returns ``(verdict, detail)``, where verdict is ``clean``, ``threat``,
-    ``error`` (the scanner ran and failed, or timed out) or ``broken`` (it
-    could not start). Only ``clean`` may release a file.
+    Verdict is ``clean``, ``threat``, ``error``, ``timeout``, ``broken`` (the
+    scanner could not start) or ``unscanned``. Only ``clean`` may release a
+    file. Each file's verdict comes from its own ClamAV-style result line:
+    ``<path>: OK`` is clean, ``<path>: <sig> FOUND`` a threat, any other line
+    an error. A file with no line falls back to the exit code: 0 is clean,
+    anything else an error.
     """
+    cmd = config.scan_command()
+    if cmd is None:
+        return [("unscanned", "")] * len(paths)
     try:
         proc = subprocess.run(
-            [*cmd, str(path)],
+            [*cmd, *map(str, paths)],
             # stdin is the MCP JSON-RPC stream; the scanner must never read it.
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             errors="replace",
-            timeout=timeout,
+            timeout=_SCAN_TIMEOUT_S,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return "error", f"timed out after {timeout:.0f}s"
+        return [("timeout", "")] * len(paths)
     except OSError as e:
-        return "broken", str(e)
-    output = (proc.stdout + proc.stderr).strip()[-_SCAN_OUTPUT_CHARS:]
-    if proc.returncode == 0:
-        return "clean", ""
-    if proc.returncode == 1:
-        return "threat", output
-    return "error", f"exit {proc.returncode}: {output}"
-
-
-def _scan_each(paths: list[Path]) -> list[tuple[str, str]]:
-    """One verdict per path, each from a scanner run over that file alone.
-
-    Per-file runs keep every verdict tied to exactly one file. All runs share
-    one time budget, and a scanner that cannot start is not tried again.
-    """
-    cmd = config.scan_command()
-    if cmd is None:
-        return [("unscanned", "")] * len(paths)
-    deadline = time.monotonic() + _SCAN_TIMEOUT_S
+        # Reported once: the error is about the scanner, not any one file.
+        return [("broken", str(e))] + [("broken", "")] * (len(paths) - 1)
+    lines = (proc.stdout + proc.stderr).splitlines()
+    tail = (proc.stdout + proc.stderr).strip()[-_SCAN_OUTPUT_CHARS:]
     verdicts: list[tuple[str, str]] = []
     for path in paths:
-        remaining = deadline - time.monotonic()
-        if verdicts and verdicts[-1][0] == "broken":
-            verdicts.append(("broken", ""))  # the error is already reported once
-        elif remaining <= 0:
-            verdicts.append(("error", "not scanned: the scan time limit ran out"))
+        line = next((ln for ln in lines if ln.startswith(f"{path}: ")), None)
+        if line is None:
+            verdicts.append(
+                ("clean", "") if proc.returncode == 0
+                else ("error", f"exit {proc.returncode}: {tail}")
+            )
+        elif line.endswith(" OK"):
+            verdicts.append(("clean", ""))
+        elif line.endswith(" FOUND"):
+            verdicts.append(("threat", line))
         else:
-            verdicts.append(_scan(cmd, path, remaining))
+            verdicts.append(("error", line))
     return verdicts
 
 
 _HELD_REASON = {
     "threat": "the virus scan found a threat",
     "error": "the virus scan failed",
-    "broken": "the virus scanner could not run",
+    "timeout": f"the virus scanner timed out after {_SCAN_TIMEOUT_S}s",
+    "broken": "the virus scanner could not start",
     "release": "scanned clean, but could not be moved out of quarantine",
     "unscanned": (
         "NOT scanned: no virus scanner is configured (install ClamAV, or "
@@ -1035,6 +1030,8 @@ def _do_download_attachments(args: dict) -> str:
         try:
             path = _write_attachment(held_dir, name, payload)
         except (OSError, ValueError) as e:
+            with contextlib.suppress(OSError):
+                (held_dir / name).unlink()  # a partial write must not linger
             refused.append(
                 f"  #{ordinal}  {name}: could not be written to quarantine ({e})"
             )
@@ -1044,7 +1041,7 @@ def _do_download_attachments(args: dict) -> str:
             (ordinal, path, f"({att.mime_type}, {len(payload)} bytes){note}")
         )
 
-    verdicts = _scan_each([path for _, path, _ in written])
+    verdicts = _scan_files([path for _, path, _ in written])
     clean = [w for w, (v, _) in zip(written, verdicts, strict=True) if v == "clean"]
     held = [(w, v, d) for w, (v, d) in zip(written, verdicts, strict=True) if v != "clean"]
 
@@ -1067,8 +1064,8 @@ def _do_download_attachments(args: dict) -> str:
                 held.append(((ordinal, path, info), "release", str(e)))
                 continue
             released.append(f"  #{ordinal}  {target} {info}")
-        with contextlib.suppress(OSError):
-            held_dir.rmdir()  # succeeds only once nothing is held there
+    with contextlib.suppress(OSError):
+        held_dir.rmdir()  # succeeds only once nothing is held there
 
     lines: list[str] = []
     if released:
