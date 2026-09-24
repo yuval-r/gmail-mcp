@@ -191,9 +191,24 @@ class FakeDrafts:
     def __init__(self, recorder):
         self.r = recorder
 
+    # The message behind an existing draft. Overridable per-test.
+    existing: dict = {"id": "r1", "message": {"id": "m9", "threadId": "t1"}}
+
     def create(self, **kw):
         self.r["draft_create"] = kw
         return FakeExec({"id": "draft_1"})
+
+    def get(self, **kw):
+        self.r["draft_get"] = kw
+        return FakeExec(FakeDrafts.existing)
+
+    def update(self, **kw):
+        self.r["draft_update"] = kw
+        return FakeExec({"id": kw["id"]})
+
+    def delete(self, **kw):
+        self.r["draft_delete"] = kw
+        return FakeExec("")
 
 
 class FakeLabels:
@@ -821,3 +836,51 @@ def test_download_tool_is_registered():
     tools = asyncio.run(server.list_tools())
     names = {t.name for t in tools}
     assert "download_attachments" in names
+
+
+# --- update / delete drafts -------------------------------------------------
+
+def _updated_mime(fake_service) -> str:
+    raw = fake_service.recorder["draft_update"]["body"]["message"]["raw"]
+    return base64.urlsafe_b64decode(raw).decode("utf-8")
+
+
+def test_update_draft_replaces_message_in_place(fake_service):
+    out = server._dispatch(
+        "update_draft", {**BASE_DRAFT, "draft_id": "r1", "subject": "Fixed subject"}
+    )
+    assert "Updated draft r1" in out
+    call = fake_service.recorder["draft_update"]
+    assert call["id"] == "r1"
+    assert call["body"]["id"] == "r1"
+    mime = _updated_mime(fake_service)
+    assert "Subject: Fixed subject" in mime
+    assert "From: a@example.com" in mime
+
+
+def test_update_draft_keeps_existing_thread_by_default(fake_service):
+    # Without thread_id, the draft stays in the thread it already sits in, and
+    # still carries reply headers for the newest real message there.
+    server._dispatch("update_draft", {**BASE_DRAFT, "draft_id": "r1"})
+    assert fake_service.recorder["draft_update"]["body"]["message"]["threadId"] == "t1"
+    assert "In-Reply-To: <second@x.com>" in _updated_mime(fake_service)
+
+
+def test_update_draft_explicit_thread_wins(fake_service):
+    server._dispatch("update_draft", {**BASE_DRAFT, "draft_id": "r1", "thread_id": "t7"})
+    assert fake_service.recorder["draft_update"]["body"]["message"]["threadId"] == "t7"
+    assert "draft_get" not in fake_service.recorder
+
+
+def test_delete_draft_deletes_one_draft(fake_service):
+    out = server._dispatch("delete_draft", {"account": "a@example.com", "draft_id": "r1"})
+    assert fake_service.recorder["draft_delete"] == {"userId": "me", "id": "r1"}
+    assert "Deleted draft r1" in out
+
+
+def test_delete_draft_takes_exactly_one_id():
+    # No list or query selection: a stray instruction cannot sweep all drafts.
+    tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    schema = tools["delete_draft"].inputSchema
+    assert set(schema["properties"]) == {"account", "draft_id"}
+    assert schema["required"] == ["account", "draft_id"]

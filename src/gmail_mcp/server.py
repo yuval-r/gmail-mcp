@@ -154,6 +154,38 @@ _ACCOUNT_PROP = {
     "description": "Email address of the authorized Gmail account to act on.",
 }
 
+_DRAFT_PROPS = {
+    "account": _ACCOUNT_PROP,
+    "to": {"type": "string"},
+    "subject": {"type": "string"},
+    "body": {"type": "string"},
+    "cc": {"type": "string"},
+    "bcc": {"type": "string"},
+    "html": {"type": "boolean", "default": False},
+    "thread_id": {
+        "type": "string",
+        "description": (
+            "Attach the draft to this thread as a reply. Gmail's "
+            "threadId is set and In-Reply-To / References are "
+            "derived from the thread's newest message, so the "
+            "reply threads in clients that ignore threadId. "
+            "Subject should match the thread (usually 'Re: ...'). "
+            "Omit for a standalone draft; in update_draft, omit to keep "
+            "the draft's current thread."
+        ),
+    },
+    "from_addr": {
+        "type": "string",
+        "description": (
+            "From address for the draft, e.g. a shared alias like "
+            "support@yourcompany.com. Must be a verified send-as "
+            "alias on this account, otherwise Gmail rewrites it to "
+            "the account address when the draft is sent. Defaults "
+            "to the account address."
+        ),
+    },
+}
+
 _MAX_BODY_PROP = {
     "type": "integer",
     "description": (
@@ -283,37 +315,40 @@ async def list_tools() -> list[Tool]:
             description="Create a draft email (not sent). Returns the draft id.",
             inputSchema={
                 "type": "object",
+                "properties": _DRAFT_PROPS,
+                "required": ["account", "to", "subject", "body"],
+            },
+        ),
+        Tool(
+            name="update_draft",
+            description=(
+                "Replace an existing draft's content in place (still not sent). "
+                "Pass the full message: every field is rewritten, nothing is "
+                "merged. The draft stays in its current thread unless thread_id "
+                "is given. Get draft ids from list_drafts or create_draft."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    **_DRAFT_PROPS,
+                    "draft_id": {"type": "string", "description": "Draft id."},
+                },
+                "required": ["account", "draft_id", "to", "subject", "body"],
+            },
+        ),
+        Tool(
+            name="delete_draft",
+            description=(
+                "Permanently delete ONE draft by draft id. This does not go to "
+                "trash and cannot be undone. Sent mail is not affected."
+            ),
+            inputSchema={
+                "type": "object",
                 "properties": {
                     "account": _ACCOUNT_PROP,
-                    "to": {"type": "string"},
-                    "subject": {"type": "string"},
-                    "body": {"type": "string"},
-                    "cc": {"type": "string"},
-                    "bcc": {"type": "string"},
-                    "html": {"type": "boolean", "default": False},
-                    "thread_id": {
-                        "type": "string",
-                        "description": (
-                            "Attach the draft to this thread as a reply. Gmail's "
-                            "threadId is set and In-Reply-To / References are "
-                            "derived from the thread's newest message, so the "
-                            "reply threads in clients that ignore threadId. "
-                            "Subject should match the thread (usually 'Re: ...'). "
-                            "Omit for a standalone draft."
-                        ),
-                    },
-                    "from_addr": {
-                        "type": "string",
-                        "description": (
-                            "From address for the draft, e.g. a shared alias like "
-                            "support@yourcompany.com. Must be a verified send-as "
-                            "alias on this account, otherwise Gmail rewrites it to "
-                            "the account address when the draft is sent. Defaults "
-                            "to the account address."
-                        ),
-                    },
+                    "draft_id": {"type": "string", "description": "Draft id."},
                 },
-                "required": ["account", "to", "subject", "body"],
+                "required": ["account", "draft_id"],
             },
         ),
         Tool(
@@ -657,6 +692,10 @@ def _dispatch(name: str, args: dict) -> str:
             return _do_download_attachments(args)
         case "create_draft":
             return _do_create_draft(args)
+        case "update_draft":
+            return _do_update_draft(args)
+        case "delete_draft":
+            return _do_delete_draft(args)
         case "list_drafts":
             return _do_list_drafts(args)
         case "list_labels":
@@ -906,9 +945,10 @@ def _do_download_attachments(args: dict) -> str:
     return "\n".join(lines)
 
 
-def _do_create_draft(args: dict) -> str:
-    service = _service_for(args["account"])
-    thread_id = args.get("thread_id")
+def _draft_message(
+    service: Any, args: dict, thread_id: str | None
+) -> dict[str, Any]:
+    """Build the Gmail message body shared by create_draft and update_draft."""
     in_reply_to, references = (
         _reply_headers(service, thread_id) if thread_id else (None, None)
     )
@@ -926,6 +966,12 @@ def _do_create_draft(args: dict) -> str:
     message: dict[str, Any] = {"raw": raw}
     if thread_id:
         message["threadId"] = thread_id
+    return message
+
+
+def _do_create_draft(args: dict) -> str:
+    service = _service_for(args["account"])
+    message = _draft_message(service, args, args.get("thread_id"))
     draft = (
         service.users()
         .drafts()
@@ -933,6 +979,34 @@ def _do_create_draft(args: dict) -> str:
         .execute()
     )
     return f"Created draft {draft.get('id')}."
+
+
+def _do_update_draft(args: dict) -> str:
+    service = _service_for(args["account"])
+    draft_id = args["draft_id"]
+    thread_id = args.get("thread_id")
+    if not thread_id:
+        # drafts.update replaces the whole message, and a message without a
+        # threadId drops out of its thread. Keep it where it already is.
+        current = (
+            service.users()
+            .drafts()
+            .get(userId="me", id=draft_id, format="minimal")
+            .execute()
+        )
+        thread_id = current.get("message", {}).get("threadId")
+    message = _draft_message(service, args, thread_id)
+    service.users().drafts().update(
+        userId="me", id=draft_id, body={"id": draft_id, "message": message}
+    ).execute()
+    return f"Updated draft {draft_id}."
+
+
+def _do_delete_draft(args: dict) -> str:
+    service = _service_for(args["account"])
+    draft_id = args["draft_id"]
+    service.users().drafts().delete(userId="me", id=draft_id).execute()
+    return f"Deleted draft {draft_id} permanently."
 
 
 def _do_list_drafts(args: dict) -> str:
