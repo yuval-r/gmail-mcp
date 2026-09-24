@@ -278,12 +278,39 @@ class FakeUsers:
         return FakeSettings(self.r)
 
 
+class FakeBatch:
+    """new_batch_http_request(): runs queued requests on execute()."""
+
+    # message ids whose batched fetch fails, mimicking a per-item 429.
+    fail_ids: set[str] = set()
+
+    def __init__(self, recorder, callback):
+        self.r = recorder
+        self.callback = callback
+        self.items = []
+
+    def add(self, request, request_id):
+        self.items.append((request_id, request))
+
+    def execute(self):
+        self.r.setdefault("batches", []).append(len(self.items))
+        for rid, req in self.items:
+            mid = req._result.get("id")
+            if mid in FakeBatch.fail_ids:
+                self.callback(rid, None, HttpError(_FakeResp(429), b"rate"))
+            else:
+                self.callback(rid, req.execute(), None)
+
+
 class FakeService:
     def __init__(self):
         self.recorder = {}
 
     def users(self):
         return FakeUsers(self.recorder)
+
+    def new_batch_http_request(self, callback):
+        return FakeBatch(self.recorder, callback)
 
 
 @pytest.fixture
@@ -301,6 +328,48 @@ def test_search_messages_dispatch(fake_service):
     assert "2 message(s) in a@example.com" in out
     assert "subj-m1" in out
     assert fake_service.recorder["list"]["q"] == "is:unread"
+
+
+def test_search_summaries_are_fetched_in_one_batch(fake_service):
+    server._dispatch("search_messages", {"account": "a@example.com", "query": "x"})
+    # Two results, one batched HTTP call, no per-message round trips.
+    assert fake_service.recorder["batches"] == [2]
+
+
+def test_search_retries_failed_batch_items_singly(fake_service, monkeypatch):
+    monkeypatch.setattr(FakeBatch, "fail_ids", {"m2"})
+    out = server._dispatch("search_messages", {"account": "a@example.com", "query": "x"})
+    # m2 failed inside the batch, then succeeded on its own.
+    assert "subj-m1" in out and "subj-m2" in out
+
+
+def test_search_all_accounts_pages_per_account(store, monkeypatch):
+    store.upsert("a@example.com", "r")
+    store.upsert("b@example.com", "r")
+    services = {}
+
+    def build(acct, st):
+        services[acct.email] = svc = FakeService()
+        return svc
+
+    def list_(self, **kw):
+        self.r["list"] = kw
+        more = kw.get("pageToken") is None
+        return FakeExec({"messages": [{"id": "m1"}], **({"nextPageToken": "t2"} if more else {})})
+
+    monkeypatch.setattr(server, "build_service", build)
+    monkeypatch.setattr(FakeMessages, "list", list_)
+    out = server._dispatch("search_all_accounts", {"query": "q"})
+    # Page one reports a token per account, as a map to pass back.
+    assert '"a@example.com": "t2"' in out and '"b@example.com": "t2"' in out
+    services.clear()
+    out = server._dispatch("search_all_accounts", {
+        "query": "q", "page_tokens": {"b@example.com": "t2"},
+    })
+    # A follow-up continues only the accounts named in page_tokens.
+    assert list(services) == ["b@example.com"]
+    assert services["b@example.com"].recorder["list"]["pageToken"] == "t2"
+    assert "page_tokens" not in out
 
 
 def test_search_messages_pages(fake_service, monkeypatch):

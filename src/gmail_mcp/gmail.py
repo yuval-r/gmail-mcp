@@ -139,6 +139,24 @@ class Attachment:
 
 
 @dataclass
+class MessageSummary:
+    """One search result: metadata headers and snippet, no body."""
+
+    id: str
+    thread_id: str = ""
+    sender: str = ""
+    to: str = ""
+    subject: str = ""
+    date: str = ""
+    snippet: str = ""
+    label_ids: list[str] = field(default_factory=list)
+
+
+# The headers a search summary shows; fetch only these with format="metadata".
+SUMMARY_HEADERS = ["From", "To", "Subject", "Date"]
+
+
+@dataclass
 class ParsedMessage:
     """Decoded view of a Gmail message resource."""
 
@@ -229,6 +247,21 @@ def parse_headers(payload: dict[str, Any]) -> dict[str, str]:
         if name:
             out[name] = h.get("value", "")
     return out
+
+
+def summarize_resource(resource: dict[str, Any]) -> MessageSummary:
+    """Build a search summary from a format="metadata" message resource."""
+    headers = parse_headers(resource.get("payload", {}))
+    return MessageSummary(
+        id=resource.get("id", ""),
+        thread_id=resource.get("threadId", ""),
+        sender=headers.get("from", ""),
+        to=headers.get("to", ""),
+        subject=headers.get("subject", ""),
+        date=headers.get("date", ""),
+        snippet=resource.get("snippet", ""),
+        label_ids=list(resource.get("labelIds", []) or []),
+    )
 
 
 def extract_body_and_attachments(
@@ -561,14 +594,14 @@ def truncate_body(text: str, limit: int | None) -> str:
     )
 
 
-def _summary_body(msg: dict[str, Any]) -> str:
+def _summary_body(msg: MessageSummary) -> str:
     """Untrusted portion of one search summary (headers + snippet, no id)."""
     return (
-        f"  From: {msg.get('from', '')}\n"
-        f"  To: {msg.get('to', '')}\n"
-        f"  Subject: {msg.get('subject', '')}\n"
-        f"  Date: {msg.get('date', '')}\n"
-        f"  {msg.get('snippet', '')}"
+        f"  From: {msg.sender}\n"
+        f"  To: {msg.to}\n"
+        f"  Subject: {msg.subject}\n"
+        f"  Date: {msg.date}\n"
+        f"  {msg.snippet}"
     )
 
 
@@ -595,16 +628,15 @@ def _parsed_body(msg: ParsedMessage, max_body_chars: int | None = None) -> str:
     return "\n".join(lines)
 
 
-def format_message_summary(msg: dict[str, Any]) -> str:
+def format_message_summary(msg: MessageSummary) -> str:
     """Format a single search-result summary block (id outside, content fenced)."""
     return (
-        f"[{msg.get('id', '')}] (thread {msg.get('threadId', '')})"
-        f"{status_tag(msg.get('labelIds'))}\n"
+        f"[{msg.id}] (thread {msg.thread_id}){status_tag(msg.label_ids)}\n"
         f"{wrap_untrusted(_summary_body(msg))}"
     )
 
 
-def format_search_results(account: str, results: list[dict[str, Any]]) -> str:
+def format_search_results(account: str, results: list[MessageSummary]) -> str:
     """Format a list of message summaries for one account, fenced once.
 
     A trusted id manifest precedes a single untrusted wrapper; fenced bodies
@@ -613,8 +645,7 @@ def format_search_results(account: str, results: list[dict[str, Any]]) -> str:
     if not results:
         return f"No messages found in {account}."
     manifest = [
-        f"  #{i} [{m.get('id', '')}] (thread {m.get('threadId', '')})"
-        f"{status_tag(m.get('labelIds'))}"
+        f"  #{i} [{m.id}] (thread {m.thread_id}){status_tag(m.label_ids)}"
         for i, m in enumerate(results, 1)
     ]
     inner = "\n\n".join(

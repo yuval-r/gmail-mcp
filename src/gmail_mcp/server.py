@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
@@ -26,8 +27,10 @@ from mcp.types import TextContent, Tool
 
 from gmail_mcp import config
 from gmail_mcp.gmail import (
+    SUMMARY_HEADERS,
     Attachment,
     GmailAuthError,
+    MessageSummary,
     ParsedMessage,
     build_mime_message,
     build_service,
@@ -40,6 +43,7 @@ from gmail_mcp.gmail import (
     resolve_label_ids,
     sanitize_filename,
     screen_attachment,
+    summarize_resource,
     wrap_untrusted,
 )
 from gmail_mcp.store import Account, TokenStore
@@ -98,59 +102,60 @@ def _resolve_body_cap(args: dict) -> int | None:
 # Gmail read helpers (network) — small wrappers around the API client
 # ---------------------------------------------------------------------------
 
-def _summarize_message(service: Any, message_id: str) -> dict[str, Any]:
-    """Fetch a message's metadata headers and snippet for a search summary."""
-    msg = (
-        service.users()
-        .messages()
-        .get(
-            userId="me",
-            id=message_id,
-            format="metadata",
-            metadataHeaders=["From", "To", "Subject", "Date"],
-        )
-        .execute()
-    )
-    headers = {
-        h["name"].lower(): h["value"]
-        for h in msg.get("payload", {}).get("headers", [])
-    }
-    return {
-        "id": msg.get("id", ""),
-        "threadId": msg.get("threadId", ""),
-        "from": headers.get("from", ""),
-        "to": headers.get("to", ""),
-        "subject": headers.get("subject", ""),
-        "date": headers.get("date", ""),
-        "snippet": msg.get("snippet", ""),
-        "labelIds": msg.get("labelIds", []),
-    }
-
-
-def _search(
+def _list_ids(
     service: Any, query: str, max_results: int, page_token: str | None = None
-) -> tuple[list[dict[str, Any]], str | None]:
-    """Return one page of message summaries and the next page's token."""
+) -> tuple[list[str], str | None]:
+    """One page of message ids matching a query, and the next page's token."""
     resp = (
         service.users()
         .messages()
         .list(userId="me", q=query, maxResults=max_results, pageToken=page_token)
         .execute()
     )
-    ids = [m["id"] for m in resp.get("messages", [])]
-    summaries = [_summarize_message(service, mid) for mid in ids]
-    return summaries, resp.get("nextPageToken")
+    return [m["id"] for m in resp.get("messages", [])], resp.get("nextPageToken")
 
 
-def _search_ids(service: Any, query: str, max_results: int) -> list[str]:
-    """Return up to max_results message ids matching a query (no content fetch)."""
-    resp = (
-        service.users()
-        .messages()
-        .list(userId="me", q=query, maxResults=max_results)
-        .execute()
+# Gmail allows 100 calls per batch but rate-limits large ones; 50 is its advice.
+_SUMMARY_BATCH = 50
+
+
+def _summary_request(service: Any, message_id: str) -> Any:
+    return service.users().messages().get(
+        userId="me", id=message_id, format="metadata",
+        metadataHeaders=SUMMARY_HEADERS,
     )
-    return [m["id"] for m in resp.get("messages", [])]
+
+
+def _summarize_messages(service: Any, ids: list[str]) -> list[MessageSummary]:
+    """Summaries for ids, in order, fetched in batched HTTP calls.
+
+    A batch can fail single items (Gmail answers 429 per item under load);
+    those are fetched again one at a time, so one throttled item does not
+    fail the whole search.
+    """
+    found: dict[str, dict[str, Any]] = {}
+
+    def collect(request_id: str, response: Any, exception: Any) -> None:
+        if exception is None:
+            found[request_id] = response
+
+    for start in range(0, len(ids), _SUMMARY_BATCH):
+        batch = service.new_batch_http_request(callback=collect)
+        for mid in ids[start:start + _SUMMARY_BATCH]:
+            batch.add(_summary_request(service, mid), request_id=mid)
+        batch.execute()
+    for mid in ids:
+        if mid not in found:
+            found[mid] = _summary_request(service, mid).execute()
+    return [summarize_resource(found[mid]) for mid in ids]
+
+
+def _search(
+    service: Any, query: str, max_results: int, page_token: str | None = None
+) -> tuple[list[MessageSummary], str | None]:
+    """Return one page of message summaries and the next page's token."""
+    ids, next_token = _list_ids(service, query, max_results, page_token)
+    return _summarize_messages(service, ids), next_token
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +480,15 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "query": {"type": "string", "description": "Gmail search query."},
                     "max_results_per_account": {"type": "integer", "default": 10},
+                    "page_tokens": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": (
+                            "Map of account to token, copied from a previous "
+                            "call's 'More results' line. Continues only those "
+                            "accounts."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -1240,14 +1254,8 @@ def _all_message_ids(service: Any, query: str) -> list[str]:
     ids: list[str] = []
     page_token: str | None = None
     while True:
-        resp = (
-            service.users()
-            .messages()
-            .list(userId="me", q=query, maxResults=500, pageToken=page_token)
-            .execute()
-        )
-        ids.extend(m["id"] for m in resp.get("messages", []))
-        page_token = resp.get("nextPageToken")
+        page, page_token = _list_ids(service, query, 500, page_token)
+        ids.extend(page)
         if not page_token:
             return ids
 
@@ -1350,7 +1358,7 @@ def _do_read_messages(args: dict) -> str:
     cap = args.get("max_results", 25)
     ids: list[str] = list(args.get("message_ids") or [])
     if not ids and args.get("query"):
-        ids = _search_ids(service, args["query"], cap)
+        ids, _ = _list_ids(service, args["query"], cap)
     if not ids:
         raise ValueError(
             "No selection given. Provide message_ids or a query to read."
@@ -1403,18 +1411,33 @@ def _do_search_all(args: dict) -> str:
         return "No accounts authorized yet. Run `gmail-mcp-auth add` to add one."
     query = args["query"]
     per = args.get("max_results_per_account", 10)
+    # A follow-up page continues only the accounts that still had more.
+    page_tokens: dict[str, str] = args.get("page_tokens") or {}
+    if page_tokens:
+        accounts = [a for a in accounts if a.email in page_tokens]
     blocks: list[str] = [f"Search '{query}' across {len(accounts)} account(s):\n"]
+    next_tokens: dict[str, str] = {}
     for acct in accounts:
         try:
             service = build_service(acct, get_store())
-            results, _ = _search(service, query, per)
+            results, token = _search(
+                service, query, per, page_tokens.get(acct.email)
+            )
             blocks.append(format_search_results(acct.email, results))
+            if token:
+                next_tokens[acct.email] = token
         except GmailAuthError as e:
             blocks.append(f"{acct.email}: auth error — {e}")
         except HttpError as e:
             status = getattr(e.resp, "status", "?")
             blocks.append(f"{acct.email}: Gmail API error {status} — {e.reason}")
-    return ("\n\n" + "=" * 60 + "\n\n").join(blocks)
+    out = ("\n\n" + "=" * 60 + "\n\n").join(blocks)
+    if next_tokens:
+        out += (
+            "\nMore results: call again with the same query and "
+            f"page_tokens={json.dumps(next_tokens)}."
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
