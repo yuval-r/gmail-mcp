@@ -85,7 +85,7 @@ def credentials_for(account: Account) -> Credentials:
 _GMAIL_DISCOVERY_DOC = json.loads(discovery_cache.get_static_doc("gmail", "v1"))
 
 
-def gmail_client(creds: Credentials) -> Any:
+def gmail_client(creds: Any) -> Any:
     """Build a Gmail API client from the in-memory discovery doc."""
     return build_from_document(_GMAIL_DISCOVERY_DOC, credentials=creds)
 
