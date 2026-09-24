@@ -123,15 +123,19 @@ def _summarize_message(service: Any, message_id: str) -> dict[str, Any]:
     }
 
 
-def _search(service: Any, query: str, max_results: int) -> list[dict[str, Any]]:
+def _search(
+    service: Any, query: str, max_results: int, page_token: str | None = None
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Return one page of message summaries and the next page's token."""
     resp = (
         service.users()
         .messages()
-        .list(userId="me", q=query, maxResults=max_results)
+        .list(userId="me", q=query, maxResults=max_results, pageToken=page_token)
         .execute()
     )
     ids = [m["id"] for m in resp.get("messages", [])]
-    return [_summarize_message(service, mid) for mid in ids]
+    summaries = [_summarize_message(service, mid) for mid in ids]
+    return summaries, resp.get("nextPageToken")
 
 
 def _search_ids(service: Any, query: str, max_results: int) -> list[str]:
@@ -233,6 +237,13 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Max messages to return (default 20).",
                         "default": 20,
+                    },
+                    "page_token": {
+                        "type": "string",
+                        "description": (
+                            "Token from a previous call's 'More results' line, "
+                            "to fetch the next page of the same query."
+                        ),
                     },
                 },
                 "required": ["account", "query"],
@@ -734,8 +745,16 @@ def _do_list_accounts() -> str:
 
 def _do_search(args: dict) -> str:
     service = _service_for(args["account"])
-    results = _search(service, args["query"], args.get("max_results", 20))
-    return format_search_results(args["account"], results)
+    results, next_token = _search(
+        service, args["query"], args.get("max_results", 20), args.get("page_token")
+    )
+    out = format_search_results(args["account"], results)
+    if next_token:
+        out += (
+            f'\nMore results: call again with the same query and '
+            f'page_token="{next_token}".'
+        )
+    return out
 
 
 def _do_read_message(args: dict) -> str:
@@ -1223,7 +1242,7 @@ def _do_search_all(args: dict) -> str:
     for acct in accounts:
         try:
             service = build_service(acct, get_store())
-            results = _search(service, query, per)
+            results, _ = _search(service, query, per)
             blocks.append(format_search_results(acct.email, results))
         except GmailAuthError as e:
             blocks.append(f"{acct.email}: auth error — {e}")

@@ -297,6 +297,28 @@ def test_search_messages_dispatch(fake_service):
     assert fake_service.recorder["list"]["q"] == "is:unread"
 
 
+def test_search_messages_pages(fake_service, monkeypatch):
+    def list_(self, **kw):
+        self.r["list"] = kw
+        return FakeExec({"messages": [{"id": "m1"}], "nextPageToken": "tok2"})
+
+    monkeypatch.setattr(FakeMessages, "list", list_)
+    out = server._dispatch(
+        "search_messages",
+        {"account": "a@example.com", "query": "x", "page_token": "tok1"},
+    )
+    assert fake_service.recorder["list"]["pageToken"] == "tok1"
+    # The next token is API output, so it sits after the fence, not inside it.
+    _, _, tail = out.partition("⟦END UNTRUSTED EMAIL CONTENT⟧")
+    assert 'page_token="tok2"' in tail
+
+
+def test_search_messages_last_page_has_no_token_hint(fake_service):
+    out = server._dispatch("search_messages", {"account": "a@example.com", "query": "x"})
+    assert "page_token" not in out
+    assert fake_service.recorder["list"].get("pageToken") is None
+
+
 def test_search_messages_shows_draft_label(fake_service, monkeypatch):
     # labelIds comes back on a metadata fetch; the summary must carry it.
     orig = FakeMessages.get
