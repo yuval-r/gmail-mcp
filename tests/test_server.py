@@ -74,7 +74,8 @@ def test_list_accounts_nonempty(store):
 # --- mocked Gmail client ----------------------------------------------------
 
 class FakeExec:
-    # num_retries passed to each direct execute(), in call order.
+    # num_retries passed to each direct execute(), in call order. Reset per
+    # test by the _fresh_fake_exec fixture.
     retries: list[int] = []
 
     def __init__(self, result):
@@ -83,6 +84,11 @@ class FakeExec:
     def execute(self, num_retries=0):
         FakeExec.retries.append(num_retries)
         return self._result
+
+
+@pytest.fixture(autouse=True)
+def _fresh_fake_exec(monkeypatch):
+    monkeypatch.setattr(FakeExec, "retries", [])
 
 
 class FakeMessages:
@@ -346,17 +352,24 @@ def test_search_summaries_are_fetched_in_one_batch(fake_service):
 
 def test_search_retries_failed_batch_items_with_backoff(fake_service, monkeypatch):
     monkeypatch.setattr(FakeBatch, "fail_ids", {"m2"})
-    monkeypatch.setattr(FakeExec, "retries", [])
     out = server._dispatch("search_messages", {"account": "a@example.com", "query": "x"})
     # m2 failed inside the batch, then succeeded on its own, and that refetch
     # let the client back off on 429/5xx instead of failing at once.
     assert "subj-m1" in out and "subj-m2" in out
-    assert FakeExec.retries[-1] == 3
+    assert FakeExec.retries[-1] == server._REFETCH_RETRIES
 
 
 def test_batch_get_tolerates_duplicate_ids(fake_service):
     got = server._batch_get(fake_service, ["m1", "m1", "m2"], format="metadata")
     assert [g["id"] for g in got] == ["m1", "m1", "m2"]
+
+
+def test_read_messages_caps_the_count(fake_service):
+    ids = [f"{i:016x}" for i in range(150)]
+    out = server._dispatch("read_messages", {
+        "account": "a@example.com", "message_ids": ids, "max_results": 500,
+    })
+    assert out.startswith(f"Read {server._READ_MESSAGES_MAX} message(s)")
 
 
 def test_read_messages_fetches_in_one_batch(fake_service):

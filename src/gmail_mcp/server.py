@@ -118,6 +118,9 @@ def _list_ids(
     return [m["id"] for m in resp.get("messages", [])], resp.get("nextPageToken")
 
 
+# read_messages holds every full message in memory before formatting any.
+_READ_MESSAGES_MAX = 100
+
 # Gmail allows 100 calls per batch but rate-limits large ones; 50 is its advice.
 _BATCH_SIZE = 50
 # Retries for a single refetch; the client backs off on 429 and 5xx itself.
@@ -660,8 +663,12 @@ async def list_tools() -> list[Tool]:
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "Max messages to read (default 25).",
+                        "description": (
+                            f"Max messages to read (default 25, at most "
+                            f"{_READ_MESSAGES_MAX})."
+                        ),
                         "default": 25,
+                        "maximum": _READ_MESSAGES_MAX,
                     },
                 },
                 "required": ["account"],
@@ -1409,7 +1416,7 @@ def _do_bulk_action(args: dict[str, Any]) -> str:
 
 def _do_read_messages(args: dict[str, Any]) -> str:
     service = _service_for(args["account"])
-    cap = args.get("max_results", 25)
+    cap = min(args.get("max_results", 25), _READ_MESSAGES_MAX)
     ids: list[str] = list(args.get("message_ids") or [])
     if not ids and args.get("query"):
         ids, _ = _list_ids(service, args["query"], cap)
@@ -1462,11 +1469,12 @@ def _do_search_all(args: dict[str, Any]) -> str:
     # A follow-up page continues only the accounts that still had more.
     page_tokens: dict[str, str] = args.get("page_tokens") or {}
     if page_tokens:
-        unknown = set(page_tokens) - {a.email for a in accounts}
+        emails = [a.email for a in accounts]
+        unknown = set(page_tokens) - set(emails)
         if unknown:
             raise ValueError(
                 f"page_tokens names unknown account(s) {sorted(unknown)}; "
-                f"authorized: {[a.email for a in accounts]}."
+                f"authorized: {emails}."
             )
         accounts = [a for a in accounts if a.email in page_tokens]
     blocks: list[str] = [f"Search '{query}' across {len(accounts)} account(s):\n"]
