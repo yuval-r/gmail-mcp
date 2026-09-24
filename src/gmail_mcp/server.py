@@ -893,9 +893,13 @@ def _write_attachment(dest_dir: Path, filename: str, payload: bytes) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
     fd = os.open(path, flags, 0o600)
-    # fdopen, not a bare os.write: that can short-write a large payload.
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(payload)
+    try:
+        # fdopen, not a bare os.write: that can short-write a large payload.
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+    except OSError:
+        path.unlink(missing_ok=True)  # a partial write must not linger
+        raise
     return path
 
 
@@ -909,6 +913,8 @@ def _scan_files(paths: list[Path]) -> list[tuple[str, str]]:
     an error. A file with no line falls back to the exit code: 0 is clean,
     anything else an error.
     """
+    if not paths:
+        return []  # with no paths, clamscan would scan the working directory
     cmd = config.scan_command()
     if cmd is None:
         return [("unscanned", "")] * len(paths)
@@ -1030,8 +1036,6 @@ def _do_download_attachments(args: dict) -> str:
         try:
             path = _write_attachment(held_dir, name, payload)
         except (OSError, ValueError) as e:
-            with contextlib.suppress(OSError):
-                (held_dir / name).unlink()  # a partial write must not linger
             refused.append(
                 f"  #{ordinal}  {name}: could not be written to quarantine ({e})"
             )

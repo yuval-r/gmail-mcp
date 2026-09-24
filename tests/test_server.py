@@ -1120,6 +1120,35 @@ def test_download_kills_hung_scanner(fake_service, downloads, monkeypatch):
     assert not (downloads / MID).exists()
 
 
+def test_download_all_refused_runs_no_scanner(fake_service, downloads, monkeypatch):
+    # With nothing written, clamscan must not run: with no paths it would
+    # scan the server's working directory.
+    def run(argv, **kw):
+        raise AssertionError(f"scanner ran with {argv}")
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    monkeypatch.setattr(FakeMessages, "full_message", _message_with(
+        [_part("setup.exe", "application/octet-stream", "att-1")]
+    ))
+    out = _download()
+    assert "Refused 1" in out
+
+
+def test_write_failure_cleanup_stays_inside_root(fake_service, downloads, monkeypatch, tmp_path):
+    # A symlinked quarantine dir makes the write refuse; the cleanup must not
+    # then delete a same-named file outside the root.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "01-invoice.pdf"
+    victim.write_bytes(b"keep me")
+    (downloads / "quarantine").mkdir(parents=True)
+    (downloads / "quarantine" / MID).symlink_to(outside)
+    _one_pdf(monkeypatch)
+    out = _download()
+    assert victim.read_bytes() == b"keep me"
+    assert "Refused 1" in out
+
+
 def test_download_write_failure_is_refused_not_raised(fake_service, downloads, monkeypatch):
     _one_pdf(monkeypatch)
 
