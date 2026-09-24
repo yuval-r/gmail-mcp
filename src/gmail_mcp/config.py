@@ -9,6 +9,9 @@ Resolves the on-disk locations the server and auth CLI need:
     ``GMAIL_MCP_CLIENT_SECRET`` environment variable.
   * The attachment download root, default ``~/.gmail-mcp/attachments``,
     overridable via the ``GMAIL_MCP_ATTACHMENT_DIR`` environment variable.
+    Downloads land in its ``quarantine/`` subdirectory first.
+  * The virus-scanner command, ``GMAIL_MCP_SCAN_CMD``, or ClamAV's
+    ``clamscan`` when it is installed.
 
 No secrets are hardcoded here. The client_id / client_secret are read
 from the client-secret JSON you download from the Google Cloud Console.
@@ -17,6 +20,8 @@ from the client-secret JSON you download from the Google Cloud Console.
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 from pathlib import Path
 
 # OAuth scopes. Granular — read, compose drafts, modify labels, and manage
@@ -105,6 +110,40 @@ def attachments_dir() -> Path:
     if override:
         return Path(override).expanduser()
     return _DEFAULT_DIR / "attachments"
+
+
+def quarantine_dir() -> Path:
+    """Where downloads are written before a virus scan releases them.
+
+    Lives under the attachment root, so the one-root containment check still
+    covers it. Message ids are hex, so no per-message directory can collide
+    with the name ``quarantine``.
+    """
+    return attachments_dir() / "quarantine"
+
+
+# Homebrew's bin dirs are not always on the PATH an MCP client gives a server.
+_CLAMSCAN_FALLBACKS = ("/opt/homebrew/bin/clamscan", "/usr/local/bin/clamscan")
+
+
+def scan_command() -> list[str] | None:
+    """Argv of the virus scanner run on quarantined downloads, or None.
+
+    Honors ``GMAIL_MCP_SCAN_CMD`` (split like a shell command; an empty value
+    turns scanning off). Otherwise uses ClamAV's ``clamscan`` if it is
+    installed. The file paths to scan are appended to the argv. The scanner
+    must follow the ClamAV exit-code convention: 0 clean, 1 threat found,
+    anything else an error.
+    """
+    raw = os.environ.get("GMAIL_MCP_SCAN_CMD")
+    if raw is not None:
+        return shlex.split(raw) or None
+    found = shutil.which("clamscan") or next(
+        (p for p in _CLAMSCAN_FALLBACKS if os.access(p, os.X_OK)), None
+    )
+    if found is None:
+        return None
+    return [found, "--no-summary", "--infected", "--stdout"]
 
 
 def max_attachment_bytes() -> int:

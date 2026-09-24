@@ -92,9 +92,9 @@ tests/        — pytest; Gmail client is mocked, no live network
   Entity decoding runs AFTER tag removal so a decoded `<` can't be re-parsed as
   a tag — keep that ordering if you touch it.
 - **Attachment downloads write to exactly one root.** `download_attachments`
-  is the only filesystem write in the server. It writes under
-  `config.attachments_dir()/<message_id>/` (env `GMAIL_MCP_ATTACHMENT_DIR`,
-  default `~/.gmail-mcp/attachments`) and takes **no destination argument** by
+  is the only filesystem write in the server. It writes only under
+  `config.attachments_dir()` (env `GMAIL_MCP_ATTACHMENT_DIR`, default
+  `~/.gmail-mcp/attachments`), quarantine first (see below), and takes **no destination argument** by
   design: one would be an arbitrary-file-write primitive reachable by an
   instruction embedded in an email. Do not add one. `sanitize_filename`
   reduces the attacker-chosen filename to an inert index-prefixed ASCII
@@ -102,14 +102,20 @@ tests/        — pytest; Gmail client is mocked, no live network
   length capped) and `_write_attachment` re-checks the resolved path against
   the root, then writes `0o600` with `O_NOFOLLOW`. The message id is validated
   against `_MESSAGE_ID_RE` before it becomes a directory name.
-- **Attachments are type-screened, not virus-scanned.** `screen_attachment`
-  refuses Gmail's own blocked-file-type list, macro-enabled Office documents,
-  executable MIME types, oversized payloads, and every attachment on a
-  `SPAM`-labeled message. It checks *all* dot-suffixes, so `invoice.pdf.exe` is
-  caught. Archives are allowed with a warning. Gmail does **not** expose its
-  malware verdict through the API and `attachments.get` will serve bytes the
-  web UI blocks, so never call this a scan in code comments, tool descriptions,
-  or docs.
+- **Attachments are type-screened, then virus-scanned in quarantine.**
+  `screen_attachment` refuses Gmail's own blocked-file-type list, macro-enabled
+  Office documents, executable MIME types, oversized payloads, and every
+  attachment on a `SPAM`-labeled message. It checks *all* dot-suffixes, so
+  `invoice.pdf.exe` is caught. Archives are allowed with a warning. That screen
+  is a type check, never call it a scan: Gmail does **not** expose its malware
+  verdict through the API and `attachments.get` will serve bytes the web UI
+  blocks. The scan is a separate local step: files that pass the screen are
+  written to `config.quarantine_dir()/<message_id>/` (under the attachment
+  root) and `_scan` runs `config.scan_command()` (`GMAIL_MCP_SCAN_CMD`, else
+  ClamAV `clamscan`) over them. Only exit 0 releases them (`_release`) to
+  `<root>/<message_id>/`. Threat, scanner error, or no scanner means they stay
+  held. Never release without a clean scan. `_MESSAGE_ID_RE` is hex-only so no
+  message id can name the `quarantine` dir.
 - **Attachments are addressed by `#N`, not by attachment id.** `_parsed_body`
   numbers them and deliberately omits the raw `attachmentId`; the download tool
   takes the same ordinal. Both sides get their ordering from one payload walk
@@ -135,6 +141,14 @@ tests/        — pytest; Gmail client is mocked, no live network
 - **Sync client under async server.** Gmail API client is blocking; `call_tool`
   wraps `_dispatch` in `asyncio.to_thread`. Keep new tool logic in `_dispatch`
   (sync) so this holds.
+- **Status labels are trusted output.** Formatters print Gmail system labels
+  (`gmail.status_tag`: DRAFT, SENT, INBOX, UNREAD, SPAM, TRASH) after each id in
+  the trusted manifest, never inside the fence. Drafts otherwise look exactly
+  like sent mail. `_summarize_message` must keep returning `labelIds`.
+- **Discovery doc is loaded once.** `gmail._GMAIL_DISCOVERY_DOC` is read at
+  import and clients use `build_from_document`. Plain `build()` re-reads the
+  JSON from the install dir on every call, which broke a running server when a
+  uv cache clean deleted its uvx env.
 - **Label resolution does not create labels.** `resolve_label_ids` matches
   existing ids/names (case-insensitive) and raises listing available names.
 

@@ -103,12 +103,14 @@ Every tool except `list_accounts` and `search_all_accounts` takes an `account`
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `list_accounts` | — | Authorized accounts + last-used time. Discover valid `account` values. |
-| `search_messages` | `account`, `query`, `max_results=20` | Message summaries (Gmail search syntax) with ids. |
+| `search_messages` | `account`, `query`, `max_results=20`, `page_token?` | Message summaries (Gmail search syntax) with ids. When more matches exist, the output ends with a `page_token` for the next page. |
 | `read_message` | `account`, `message_id`, `format="full"`, `max_body_chars?` | Decoded headers, plaintext body (HTML stripped if needed), attachment metadata. Body capped by default; pass `max_body_chars=0` for the full body. |
 | `read_thread` | `account`, `thread_id`, `max_body_chars?` | Every message in the thread, in order. Each body capped by default; `max_body_chars=0` for full. |
-| `download_attachments` | `account`, `message_id`, `index?` | Save a message's attachments to disk and return absolute paths. Address them by the `#N` shown in `read_message`; omit `index` for all of them. Fixed download root, no destination argument. Dangerous file types and anything on a spam-labeled message are refused. |
+| `download_attachments` | `account`, `message_id`, `index?` | Save a message's attachments to disk and return absolute paths. Address them by the `#N` shown in `read_message`; omit `index` for all of them. Fixed download root, no destination argument. Dangerous file types and anything on a spam-labeled message are refused. The rest is written to quarantine and virus-scanned; only clean files are released. |
 | `search_all_accounts` | `query`, `max_results_per_account=10` | One search across **every** account, each result tagged by account. |
 | `create_draft` | `account`, `to`, `subject`, `body`, `cc?`, `bcc?`, `html=false` | A draft (not sent). Returns the draft id. |
+| `update_draft` | `account`, `draft_id`, `to`, `subject`, `body`, `cc?`, `bcc?`, `html=false`, `thread_id?`, `from_addr?` | Rewrite a draft in place (still not sent). Every field is replaced. Stays in its current thread unless `thread_id` is given. |
+| `delete_draft` | `account`, `draft_id` | Permanently delete one draft. Takes exactly one id; no query or list selection. |
 | `list_drafts` | `account`, `max_results=20` | Draft ids in the account. |
 | `list_labels` | `account` | The account's labels (name + id). |
 | `modify_labels` | `account`, selection (`message_id` \| `message_ids` \| `query`), `add?`, `remove?` | Add/remove labels on a **selection** (one id, a list, or everything a query matches), batched 1000/call. General mutator: archive = remove INBOX, mark-read = remove UNREAD, star = add STARRED. |
@@ -186,7 +188,7 @@ machines with no browser — see [The headless auth path](#the-headless-auth-pat
 | Scope | What it grants |
 |-------|----------------|
 | `gmail.readonly` | Read mail and metadata: search messages/threads, read bodies, list labels and drafts. Read-only — cannot modify anything. |
-| `gmail.compose` | Create, update, and manage drafts. Used only by `create_draft`. |
+| `gmail.compose` | Create, update, and manage drafts. Used by `create_draft`, `update_draft`, and `delete_draft`. |
 | `gmail.modify` | Add/remove labels on messages. Used by `modify_labels`. |
 | `gmail.settings.basic` | List, create, and delete filters. Used by `list_filters`/`create_filter`/`delete_filter`. Does **not** grant forwarding-address changes (that's `gmail.settings.sharing`, not requested). |
 
@@ -381,12 +383,23 @@ low-stakes:
   last, so `invoice.pdf.exe` is caught. Archives are saved but flagged, since
   nothing here can look inside one.
 
-  **This is a type screen, not a virus scan.** Gmail scans attachments
-  server-side but does not expose the verdict through its API. There is no
-  malware field on the message or attachment resource, and `attachments.get`
-  will serve bytes the Gmail web UI refuses to let you download. A clean verdict
-  here means "not an obvious weapon," never "scanned and safe." The saved file's
-  *contents* remain untrusted third-party data.
+  **The type screen is not a virus scan, so a local scan follows it.** Gmail
+  scans attachments server-side but does not expose the verdict through its API.
+  There is no malware field on the message or attachment resource, and
+  `attachments.get` will serve bytes the Gmail web UI refuses to let you
+  download. So files that pass the screen are written to
+  `~/.gmail-mcp/attachments/quarantine/<message_id>/` and handed to a local
+  scanner: ClamAV's `clamscan` when it is installed, or whatever
+  `GMAIL_MCP_SCAN_CMD` names. Only a clean result (exit 0) moves them to
+  `~/.gmail-mcp/attachments/<message_id>/`. A threat (exit 1), a scanner error,
+  or no scanner at all leaves them in quarantine and says so. A clean scan
+  lowers the risk; it does not prove a file safe. The saved file's *contents*
+  remain untrusted third-party data.
+
+  To set up ClamAV on macOS: `brew install clamav`, copy
+  `$(brew --prefix)/etc/clamav/freshclam.conf.sample` to `freshclam.conf` and
+  delete its `Example` line, then run `freshclam` to fetch signatures. Run
+  `freshclam` again on a schedule, or signatures go stale.
 
 **Known limitation.** This only governs *this* server's surface. If the same
 agent session also has a tool that can reach the open internet (web fetch, HTTP),
@@ -464,6 +477,7 @@ All optional — sane defaults under `~/.gmail-mcp/`.
 | `GMAIL_MCP_CLIENT_SECRET` | `~/.gmail-mcp/client_secret.json` | Downloaded Google OAuth client. |
 | `GMAIL_MCP_OAUTH_PORT` | `8765` | Fixed loopback port for the auth flow (forward this over SSH on a headless box). |
 | `GMAIL_MCP_ATTACHMENT_DIR` | `~/.gmail-mcp/attachments` | Download root for `download_attachments`. Files land in a per-message subdirectory. This is the only location the server writes to. |
+| `GMAIL_MCP_SCAN_CMD` | `clamscan` if installed | Virus scanner run on quarantined downloads, split like a shell command; file paths are appended. Must exit 0 for clean, 1 for a threat. An empty value turns scanning off, so downloads stay in quarantine. |
 | `GMAIL_MCP_MAX_ATTACHMENT_BYTES` | `26214400` (25 MB) | Per-attachment size ceiling. Gmail's own limit is 25 MB, so this refuses nothing Gmail would deliver. `0` (or negative) means unlimited. |
 | `GMAIL_MCP_MAX_BODY_CHARS` | `500` | Default per-message body cap for `read_message`/`read_thread`. Deliberately tight so reads are cheap by default; `0` (or negative) means unlimited, and a per-call `max_body_chars` argument overrides it. |
 

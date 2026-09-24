@@ -336,8 +336,10 @@ def resolve_label_ids(
 # 2. WHETHER IT LANDS AT ALL. ``screen_attachment`` refuses types Gmail itself
 #    blocks in transit, plus macro-enabled Office documents.
 #
-# What this is NOT: an antivirus scan. Gmail scans attachments server-side but
-# does not expose the verdict through the API. There is no malware field on
+# What this is NOT: an antivirus scan. The server runs a local scanner over the
+# files that pass this screen (see _scan in server.py); this module only types
+# them. Gmail scans attachments server-side but does not expose the verdict
+# through the API. There is no malware field on
 # the message or attachment resource, and ``attachments.get`` will happily
 # serve bytes the Gmail web UI refuses to download. The only Gmail verdict
 # visible here is the SPAM label on the parent message, which is why a spam
@@ -675,7 +677,7 @@ def build_mime_message(
     """Build a base64url-encoded RFC822 message for a draft.
 
     Returns the URL-safe base64 string Gmail expects in ``{"raw": ...}``.
-    Used only by create_draft — this server does not send mail.
+    Used only by create_draft and update_draft; this server does not send mail.
     """
     subtype = "html" if html else "plain"
     if cc or bcc:
